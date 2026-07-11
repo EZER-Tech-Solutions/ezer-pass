@@ -1,0 +1,10 @@
+[package]
+name = "ezer-pass"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+colored = "3.1.1"
+rustyline = "17"

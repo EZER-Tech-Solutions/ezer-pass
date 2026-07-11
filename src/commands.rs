@@ -1,5 +1,5 @@
 use crate::{fileio, pass, store};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::path::Path;
 
@@ -33,7 +33,10 @@ impl Session {
         if self.store.is_entry(&path) {
             Ok(path)
         } else if self.store.is_dir(&path) {
-            bail!("{} is a directory (try `ls {input}`)", store::display(&path));
+            bail!(
+                "{} is a directory (try `ls {input}`)",
+                store::display(&path)
+            );
         } else {
             bail!("{} is not in the password store", store::display(&path));
         }
@@ -130,10 +133,14 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             }
             sess.cwd = target;
             if !sess.interactive {
-                eprintln!("note: cd only has an effect inside the interactive session (run `ezer-pass` with no arguments)");
+                eprintln!(
+                    "{}",
+                    "note: cd only has an effect inside the interactive session (run `ezer-pass` with no arguments)"
+                        .dimmed()
+                );
             }
         }
-        "pwd" => println!("{}", store::display(&sess.cwd)),
+        "pwd" => println!("{}", store::display(&sess.cwd).blue().bold()),
         "show" => {
             expect_args(&positional, "show [-c] <entry>", 1, 1)?;
             let clip = flags.iter().any(|f| *f == "-c" || *f == "--clip");
@@ -151,7 +158,12 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             cmd_export(sess, positional[0], positional.get(1).copied(), force)?
         }
         "generate" => {
-            expect_args(&positional, "generate [-n] [-c] [-f] <entry> [length]", 1, 2)?;
+            expect_args(
+                &positional,
+                "generate [-n] [-c] [-f] <entry> [length]",
+                1,
+                2,
+            )?;
             let path = sess.resolve(positional[0]);
             let mut pass_args = vec!["generate"];
             pass_args.extend(&flags);
@@ -163,7 +175,8 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "edit" => {
             expect_args(&positional, "edit <entry>", 1, 1)?;
             let path = sess.resolve(positional[0]);
-            pass::run_interactive(&["edit", "--", &path])?
+            // pass's cmd_edit takes no options and rejects a `--` separator.
+            pass::run_interactive(&["edit", &path])?
         }
         "rm" => {
             expect_args(&positional, "rm [-r] [-f] <path>", 1, 1)?;
@@ -236,10 +249,11 @@ fn cmd_show(sess: &Session, arg: &str, clip: bool) -> Result<()> {
     if fileio::marker_filename(&content).is_some() {
         let entry = fileio::decode_payload(&content)?;
         println!(
-            "{} {} ({} bytes) — use `export {arg}` to write it out",
-            "file entry:".yellow(),
+            "{} {} ({} bytes) — use {} to write it out",
+            "file entry:".yellow().bold(),
             entry.filename,
-            entry.data.len()
+            entry.data.len(),
+            format!("`export {arg}`").green()
         );
     } else {
         print!("{content}");
@@ -303,9 +317,8 @@ fn cmd_import(sess: &Session, os_file: &str, entry: &str, force: bool) -> Result
 fn cmd_export(sess: &Session, entry: &str, dest: Option<&str>, force: bool) -> Result<()> {
     let path = sess.resolve_entry(entry)?;
     let content = pass::show(&path)?;
-    let file = fileio::decode_payload(&content).with_context(|| {
-        format!("{} is not a file entry", store::display(&path))
-    })?;
+    let file = fileio::decode_payload(&content)
+        .with_context(|| format!("{} is not a file entry", store::display(&path)))?;
     let mut dest = std::path::PathBuf::from(dest.unwrap_or(&file.filename));
     if dest.is_dir() {
         dest.push(&file.filename);
@@ -325,30 +338,44 @@ fn cmd_export(sess: &Session, entry: &str, dest: Option<&str>, force: bool) -> R
 }
 
 fn print_help() {
-    let help = "\
-navigation
-  ls [path]                    list the current (or given) directory
-  cd [path]                    change directory (.., /, subdirs); bare dir names also work
-  pwd                          print the current store directory
+    // Pad before coloring: ANSI escapes would otherwise count toward the width.
+    let entry = |usage: &str, desc: &str| println!("  {} {desc}", format!("{usage:<33}").cyan());
+    let section = |title: &str| println!("{}", title.yellow().bold());
 
-passwords (forwarded to pass, paths relative to the current directory)
-  show [-c] <entry>            print an entry, or -c to copy to the clipboard
-  insert [-m] [-e] <entry>     add an entry (interactive)
-  generate [-n] <entry> [len]  generate a new password
-  edit <entry>                 edit in $EDITOR
-  rm [-r] <path>               remove an entry or directory
-  mv <src> <dest>              rename/move
-  cp <src> <dest>              copy
-  find <terms>                 list entries matching names
-  grep <pattern>               search inside decrypted entries
-
-files (base64-encoded pass entries)
-  import [--force] <file> <entry>   store a file as an entry (1 MiB soft limit)
-  export [-f] <entry> [dest]        write a file entry back out to disk
-
-  help                         this text
-  exit | quit | Ctrl-D         leave";
-    println!("{help}");
+    section("navigation");
+    entry("ls [path]", "list the current (or given) directory");
+    entry(
+        "cd [path]",
+        "change directory (.., /, subdirs); bare dir names also work",
+    );
+    entry("pwd", "print the current store directory");
+    println!();
+    section("passwords (forwarded to pass, paths relative to the current directory)");
+    entry(
+        "show [-c] <entry>",
+        "print an entry, or -c to copy to the clipboard",
+    );
+    entry("insert [-m] [-e] <entry>", "add an entry (interactive)");
+    entry("generate [-n] <entry> [len]", "generate a new password");
+    entry("edit <entry>", "edit in $EDITOR");
+    entry("rm [-r] <path>", "remove an entry or directory");
+    entry("mv <src> <dest>", "rename/move");
+    entry("cp <src> <dest>", "copy");
+    entry("find <terms>", "list entries matching names");
+    entry("grep <pattern>", "search inside decrypted entries");
+    println!();
+    section("files (base64-encoded pass entries)");
+    entry(
+        "import [--force] <file> <entry>",
+        "store a file as an entry (1 MiB soft limit)",
+    );
+    entry(
+        "export [-f] <entry> [dest]",
+        "write a file entry back out to disk",
+    );
+    println!();
+    entry("help", "this text");
+    entry("exit | quit | Ctrl-D", "leave");
 }
 
 #[cfg(test)]
@@ -357,7 +384,10 @@ mod tests {
 
     #[test]
     fn plain_words() {
-        assert_eq!(tokenize("show servers/web1").unwrap(), ["show", "servers/web1"]);
+        assert_eq!(
+            tokenize("show servers/web1").unwrap(),
+            ["show", "servers/web1"]
+        );
         assert_eq!(tokenize("  ls  ").unwrap(), ["ls"]);
         assert!(tokenize("").unwrap().is_empty());
     }

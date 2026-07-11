@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// All GPG/git/clipboard work is delegated to the `pass` binary. Store paths
@@ -19,6 +20,39 @@ pub fn run_interactive(args: &[&str]) -> Result<()> {
         bail!("pass {} failed", args.first().unwrap_or(&""));
     }
     Ok(())
+}
+
+/// The store's upstream branch (e.g. "origin/master"), if the store is a git
+/// repo with a configured upstream. `None` means pull/push would only error,
+/// so auto-sync should stay out of the way.
+pub fn git_upstream(store_root: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C"])
+        .arg(store_root)
+        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let upstream = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!upstream.is_empty()).then_some(upstream)
+}
+
+/// How many local commits the store is ahead of its upstream; 0 on any failure.
+pub fn git_ahead_count(store_root: &Path) -> u64 {
+    let Ok(out) = Command::new("git")
+        .args(["-C"])
+        .arg(store_root)
+        .args(["rev-list", "--count", "@{upstream}..HEAD"])
+        .output()
+    else {
+        return 0;
+    };
+    if !out.status.success() {
+        return 0;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
 }
 
 /// Decrypt an entry and capture its contents. Only stdout is captured: stdin

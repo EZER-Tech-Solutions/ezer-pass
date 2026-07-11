@@ -64,10 +64,25 @@ hunter2
 | `find <terms>` / `grep <pattern>` | search names / decrypted contents |
 | `import [--force] <file> <entry>` | store a file as a base64 entry |
 | `export [-f] <entry> [dest]` | write a file entry back to disk |
+| `git <git-args>` | run git in the store (`git log`, `git remote add`, ...) |
 
 Every command also works one-shot from your shell with the same syntax:
 `ezer-pass show servers/web1`, `ezer-pass import cert.pem servers/cert`.
-Anything not listed (git, otp, init, ...) is out of scope — use plain `pass`.
+Anything not listed (otp, init, ...) is out of scope — use plain `pass`.
+
+## Git sync
+
+If the store is a git repository with a configured upstream, the interactive
+session keeps it synced automatically:
+
+- **On startup** it asks `pull from origin/master? [Y/n]` and runs
+  `git pull --ff-only` on yes (a diverged store is reported and left for you to
+  resolve; a failed pull never blocks the session).
+- **On exit** — `exit` or `Ctrl-D` — if you have unpushed commits, it asks
+  `push 2 commits to origin/master? [Y/n]` and pushes on yes.
+
+Stores without git (or without a remote) are left completely alone, and one-shot
+commands never touch git.
 
 ## File entries
 

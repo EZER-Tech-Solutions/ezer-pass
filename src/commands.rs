@@ -198,6 +198,14 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             pass_args.push(&dest);
             pass::run_interactive(&pass_args)?
         }
+        "git" => {
+            if args.is_empty() {
+                bail!("usage: git <git-args>");
+            }
+            let mut pass_args = vec!["git"];
+            pass_args.extend(args.iter().map(String::as_str));
+            pass::run_interactive(&pass_args)?
+        }
         "find" | "grep" => {
             if args.is_empty() {
                 bail!("usage: {cmd} <search-terms>");
@@ -363,6 +371,10 @@ fn print_help() {
     entry("cp <src> <dest>", "copy");
     entry("find <terms>", "list entries matching names");
     entry("grep <pattern>", "search inside decrypted entries");
+    entry(
+        "git <git-args>",
+        "run git in the store (pull offered on startup, push on exit)",
+    );
     println!();
     section("files (base64-encoded pass entries)");
     entry(

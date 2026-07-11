@@ -1,5 +1,5 @@
 use crate::commands::{self, Outcome, Session};
-use crate::store;
+use crate::{pass, store};
 use colored::Colorize;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
@@ -157,6 +157,24 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         sess.store.root().display()
     );
 
+    let upstream = pass::git_upstream(sess.store.root());
+    if let Some(upstream) = &upstream {
+        if confirm(&mut rl, &format!("pull from {upstream}? [Y/n] ")) {
+            // --ff-only so a diverged store fails cleanly instead of dropping
+            // into an editor for a merge commit; sync failure must not block
+            // the session.
+            if pass::run_interactive(&["git", "pull", "--ff-only"]).is_err() {
+                eprintln!(
+                    "{}",
+                    "warning: git pull failed — continuing unsynced (resolve with `git ...`)"
+                        .yellow()
+                );
+            }
+        } else {
+            println!("{}", "not pulled (pull later with `git pull`)".dimmed());
+        }
+    }
+
     loop {
         if let Some(helper) = rl.helper_mut() {
             helper.cwd = sess.cwd.clone();
@@ -188,8 +206,43 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(upstream) = &upstream {
+        offer_push(&mut rl, sess, upstream);
+    }
+
     if let Some(path) = &history {
         let _ = rl.save_history(path);
     }
     Ok(())
+}
+
+/// Ask a [Y/n] question: Enter or y/yes means yes; anything else, Ctrl-C, or
+/// Ctrl-D means no.
+fn confirm(rl: &mut Editor<EzerHelper, FileHistory>, prompt: &str) -> bool {
+    matches!(
+        rl.readline(prompt),
+        Ok(answer) if matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
+    )
+}
+
+/// On exit, offer to push any local commits to the store's upstream.
+fn offer_push(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session, upstream: &str) {
+    let ahead = pass::git_ahead_count(sess.store.root());
+    if ahead == 0 {
+        return;
+    }
+    let prompt = format!(
+        "push {ahead} commit{} to {upstream}? [Y/n] ",
+        if ahead == 1 { "" } else { "s" }
+    );
+    if confirm(rl, &prompt) {
+        if pass::run_interactive(&["git", "push"]).is_err() {
+            eprintln!(
+                "{}",
+                "warning: git push failed — your commits are still local".yellow()
+            );
+        }
+    } else {
+        println!("{}", "not pushed (push later with `git push`)".dimmed());
+    }
 }

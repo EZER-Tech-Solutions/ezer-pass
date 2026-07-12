@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::STANDARD;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 
 /// First line of an entry that stores a base64-encoded file:
 /// `!ezer-pass:b64:<original-basename>`
@@ -20,9 +20,12 @@ pub fn marker_filename(content: &str) -> Option<&str> {
     content.lines().next()?.strip_prefix(MARKER_PREFIX)
 }
 
+/// Encode a file entry as a string suitable for storage in the password store.
 pub fn encode_payload(filename: &str, data: &[u8]) -> String {
     let b64 = STANDARD.encode(data);
-    let mut out = String::with_capacity(MARKER_PREFIX.len() + filename.len() + b64.len() + b64.len() / 76 + 2);
+    let mut out = String::with_capacity(
+        MARKER_PREFIX.len() + filename.len() + b64.len() + b64.len() / 76 + 2,
+    );
     out.push_str(MARKER_PREFIX);
     out.push_str(filename);
     out.push('\n');
@@ -33,6 +36,7 @@ pub fn encode_payload(filename: &str, data: &[u8]) -> String {
     out
 }
 
+/// Decode a file entry from its string representation.
 pub fn decode_payload(content: &str) -> Result<FileEntry> {
     let mut lines = content.lines();
     let filename = lines

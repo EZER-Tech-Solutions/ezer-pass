@@ -17,6 +17,7 @@ pub enum Outcome {
 
 impl Session {
     pub fn new(store: store::Store, interactive: bool) -> Self {
+        // initialize the session with the store and set the current working directory to root
         Session {
             store,
             cwd: String::new(),
@@ -115,6 +116,7 @@ fn expect_args(positional: &[&str], usage: &str, min: usize, max: usize) -> Resu
     Ok(())
 }
 
+/// Run a command in the given session, returning an Outcome indicating whether to continue or exit.
 pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
     let cmd = argv[0].as_str();
     let args = &argv[1..];
@@ -225,6 +227,7 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
     Ok(Outcome::Continue)
 }
 
+/// List the contents of a store directory, or show a single entry.
 fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
     let path = sess.resolve(arg);
     if sess.store.is_dir(&path) {
@@ -247,6 +250,7 @@ fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
     Ok(())
 }
 
+/// Show the contents of a store entry, optionally copying it to the clipboard.
 fn cmd_show(sess: &Session, arg: &str, clip: bool) -> Result<()> {
     let path = sess.resolve_entry(arg)?;
     if clip {
@@ -269,6 +273,7 @@ fn cmd_show(sess: &Session, arg: &str, clip: bool) -> Result<()> {
     Ok(())
 }
 
+/// Insert a new entry into the store.
 fn cmd_insert(sess: &Session, flags: &[&str], positional: &[&str]) -> Result<()> {
     // `insert --file <os-file> <entry>` is an alias for `import`.
     if flags.contains(&"--file") {
@@ -285,6 +290,7 @@ fn cmd_insert(sess: &Session, flags: &[&str], positional: &[&str]) -> Result<()>
     pass::run_interactive(&pass_args)
 }
 
+/// Import a file from the OS filesystem into the password store as a base64-encoded entry.
 fn cmd_import(sess: &Session, os_file: &str, entry: &str, force: bool) -> Result<()> {
     let path = sess.resolve(entry);
     if sess.store.is_entry(&path) && !force {
@@ -322,6 +328,7 @@ fn cmd_import(sess: &Session, os_file: &str, entry: &str, force: bool) -> Result
     Ok(())
 }
 
+/// Export a file entry from the password store back to the OS filesystem.
 fn cmd_export(sess: &Session, entry: &str, dest: Option<&str>, force: bool) -> Result<()> {
     let path = sess.resolve_entry(entry)?;
     let content = pass::show(&path)?;
@@ -345,6 +352,7 @@ fn cmd_export(sess: &Session, entry: &str, dest: Option<&str>, force: bool) -> R
     Ok(())
 }
 
+/// Print the help text for the command-line interface, with colored formatting.
 fn print_help() {
     // Pad before coloring: ANSI escapes would otherwise count toward the width.
     let entry = |usage: &str, desc: &str| println!("  {} {desc}", format!("{usage:<33}").cyan());
@@ -384,6 +392,12 @@ fn print_help() {
     entry(
         "export [-f] <entry> [dest]",
         "write a file entry back out to disk",
+    );
+    println!();
+    section("version control (pass git)");
+    entry(
+        "git <git-args>",
+        "run git in the store (pull offered on startup, push on exit)",
     );
     println!();
     entry("help", "this text");

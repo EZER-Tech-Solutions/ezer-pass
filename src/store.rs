@@ -1,10 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The password store on disk. Entry/directory names are not encrypted, so the
-/// tree is read straight from the filesystem; only entry *contents* go through
-/// `pass`.
+/// The password store on disk.
+/// Entry/directory names are not encrypted, so the tree is read straight from the filesystem;
+/// only entry *contents* go through `pass`.
 pub struct Store {
     root: PathBuf,
 }
@@ -16,7 +16,10 @@ pub struct Node {
 }
 
 impl Store {
+    /// Opens the user password store, returning an error if it does not exist.
+    /// The store is located at `$PASSWORD_STORE_DIR` if set, otherwise at `$HOME/.password-store`.
     pub fn open() -> Result<Self> {
+        // Check for a user-specified store directory, then fall back to `$HOME/.password-store`.
         let root = match std::env::var_os("PASSWORD_STORE_DIR") {
             Some(dir) => PathBuf::from(dir),
             None => {
@@ -24,19 +27,23 @@ impl Store {
                 Path::new(&home).join(".password-store")
             }
         };
+        // Check that the store directory exists and is a directory.
         if !root.is_dir() {
             bail!(
                 "password store not found at {} (run `pass init <gpg-id>` first)",
                 root.display()
             );
         }
+        // Return the store
         Ok(Store { root })
     }
 
+    /// Returns the root path of the store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Returns the absolute path of a store directory, given its store path.
     fn dir_path(&self, store_path: &str) -> PathBuf {
         if store_path.is_empty() {
             self.root.clone()
@@ -45,10 +52,12 @@ impl Store {
         }
     }
 
+    /// Returns true if the given store path is a directory in the store.
     pub fn is_dir(&self, store_path: &str) -> bool {
         self.dir_path(store_path).is_dir()
     }
 
+    /// Returns true if the given store path is an entry in the store.
     pub fn is_entry(&self, store_path: &str) -> bool {
         !store_path.is_empty() && self.root.join(format!("{store_path}.gpg")).is_file()
     }
@@ -56,10 +65,17 @@ impl Store {
     /// List a store directory: subdirectories plus entries (`.gpg` stripped),
     /// dotfiles (`.git`, `.gpg-id`, ...) skipped. Directories sort first.
     pub fn list(&self, store_path: &str) -> Result<Vec<Node>> {
+        // Get the absolute path of the directory in the store.
         let dir = self.dir_path(store_path);
-        let entries = fs::read_dir(&dir)
-            .with_context(|| format!("cannot read {}", display(store_path)))?;
+
+        // Get the entries in the directory.
+        let entries =
+            fs::read_dir(&dir).with_context(|| format!("cannot read {}", display(store_path)))?;
+
+        // Initialize a vector to hold the nodes (subdirectories and entries).
         let mut nodes = Vec::new();
+
+        // Insert entries as nodes, skipping dotfiles and stripping `.gpg` from entries.
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();

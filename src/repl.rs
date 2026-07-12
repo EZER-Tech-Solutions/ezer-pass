@@ -12,8 +12,8 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 const COMMANDS: &[&str] = &[
-    "ls", "cd", "pwd", "show", "insert", "import", "export", "generate", "edit", "rm", "mv",
-    "cp", "find", "grep", "help", "exit", "quit",
+    "ls", "cd", "pwd", "show", "insert", "import", "export", "generate", "edit", "rm", "mv", "cp",
+    "find", "grep", "git", "help", "exit", "quit",
 ];
 
 struct EzerHelper {
@@ -106,7 +106,10 @@ impl Highlighter for EzerHelper {
             return Cow::Borrowed(prompt);
         }
         // "ezer:/path > " → color the name and path.
-        match prompt.strip_prefix("ezer:").and_then(|r| r.strip_suffix(" > ")) {
+        match prompt
+            .strip_prefix("ezer:")
+            .and_then(|r| r.strip_suffix(" > "))
+        {
             Some(path) => Cow::Owned(format!(
                 "{}{}{} ",
                 "ezer:".green().bold(),
@@ -125,6 +128,8 @@ impl Hinter for EzerHelper {
 impl Validator for EzerHelper {}
 impl Helper for EzerHelper {}
 
+/// Return the path to the history file, creating the directory if necessary.
+/// NOTE: History never tracks passwords, only commands and store paths.
 fn history_path() -> Option<PathBuf> {
     let state_dir = match std::env::var_os("XDG_STATE_HOME") {
         Some(d) => PathBuf::from(d),
@@ -135,7 +140,11 @@ fn history_path() -> Option<PathBuf> {
     Some(dir.join("history"))
 }
 
+/// Run the interactive REPL (Read-Eval-Print Loop) for the password manager.
 pub fn run(sess: &mut Session) -> anyhow::Result<()> {
+    // Build rustyline configuration with:
+    // - List completion type (tab-completion shows a list of matches)
+    // - No automatic history addition (we add history manually after successful commands)
     let config = Config::builder()
         .completion_type(CompletionType::List)
         .auto_add_history(false)
@@ -146,9 +155,13 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         cwd: String::new(),
         filename: FilenameCompleter::new(),
     }));
+
+    // load or create the history file, if possible.
+    // If the history file cannot be created, continue without history.
     let history = history_path();
     if let Some(path) = &history {
-        let _ = rl.load_history(path); // fine if it doesn't exist yet
+        // Load the command history from the history file.
+        let _ = rl.load_history(path);
     }
 
     println!(
@@ -157,6 +170,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         sess.store.root().display()
     );
 
+    // If the store has an upstream, offer to pull any changes from it.
     let upstream = pass::git_upstream(sess.store.root());
     if let Some(upstream) = &upstream {
         if confirm(&mut rl, &format!("pull from {upstream}? [Y/n] ")) {
@@ -175,18 +189,27 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         }
     }
 
+    // Main interactive loop: read a line, tokenize it, and run the command.
     loop {
+        // Set the helper's cwd to the session's cwd before each readline call, so completions are relative to the current directory.
         if let Some(helper) = rl.helper_mut() {
             helper.cwd = sess.cwd.clone();
         }
+
+        // Output the prompt with the current working directory, and read a line of input from the user.
         let prompt = format!("ezer:{} > ", store::display(&sess.cwd));
         match rl.readline(&prompt) {
             Ok(line) => {
+                // Trim whitespace from the line and skip empty lines.
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
                 }
+
+                // Add input to history.
                 let _ = rl.add_history_entry(line);
+
+                // Tokenize the input line into arguments and run the command.
                 let result = commands::tokenize(line).and_then(|argv| {
                     if argv.is_empty() {
                         Ok(Outcome::Continue)
@@ -194,22 +217,28 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
                         commands::run(sess, &argv)
                     }
                 });
+
+                // If the command returns an error, print it to stderr. If the command returns Outcome::Exit, break the loop and exit the REPL.
                 match result {
                     Ok(Outcome::Continue) => {}
                     Ok(Outcome::Exit) => break,
                     Err(e) => eprintln!("{} {e:#}", "error:".red().bold()),
                 }
             }
+
+            // Handle Ctrl-C and Ctrl-D gracefully:
             Err(ReadlineError::Interrupted) => continue, // Ctrl-C clears the line
             Err(ReadlineError::Eof) => break,            // Ctrl-D quits
             Err(e) => return Err(e.into()),
         }
     }
 
+    // On exit, offer to push any local commits to the store's upstream.
     if let Some(upstream) = &upstream {
         offer_push(&mut rl, sess, upstream);
     }
 
+    // Save the command history to the history file.
     if let Some(path) = &history {
         let _ = rl.save_history(path);
     }

@@ -12,8 +12,15 @@ fn pass_cmd() -> Command {
 /// Run pass with inherited stdio, for anything interactive: pinentry, editor,
 /// rm confirmation, clipboard messages. `args` must include the subcommand.
 pub fn run_interactive(args: &[&str]) -> Result<()> {
+    run_interactive_env(args, &[])
+}
+
+/// Same as `run_interactive`, with extra environment variables set (e.g.
+/// `PASSWORD_STORE_CHARACTER_SET` to steer `pass generate`'s charset).
+pub fn run_interactive_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     let status = pass_cmd()
         .args(args)
+        .envs(env.iter().copied())
         .status()
         .context("failed to run `pass` (is it installed?)")?;
     if !status.success() {

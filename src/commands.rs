@@ -162,26 +162,27 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n] [-c] [-f] [--url-safe|--hex|--digits] <entry> [length]",
+                "generate [-n] [-c] [-f] [--url-safe|--hex|--digits|--base-64] <entry> [length]",
                 1,
                 2,
             )?;
             let path = sess.resolve(positional[0]);
             let charset_flags: Vec<&&str> = flags
                 .iter()
-                .filter(|f| matches!(**f, "--url-safe" | "--hex" | "--digits"))
+                .filter(|f| matches!(**f, "--url-safe" | "--hex" | "--digits" | "--base-64"))
                 .collect();
             if charset_flags.len() > 1 {
-                bail!("only one of --url-safe, --hex, --digits may be given");
+                bail!("only one of --url-safe, --hex, --digits, --base-64 may be given");
             }
             let charset = charset_flags.first().map(|f| match **f {
                 "--url-safe" => "A-Za-z0-9_-",
                 "--hex" => "0-9a-f",
                 "--digits" => "0-9",
+                "--base-64" => "A-Za-z0-9+/",
                 _ => unreachable!(),
             });
             if charset.is_some() && flags.iter().any(|f| *f == "-n" || *f == "--no-symbols") {
-                bail!("-n/--no-symbols overrides --url-safe/--hex/--digits in pass; drop one");
+                bail!("-n/--no-symbols overrides --url-safe/--hex/--digits/--base-64 in pass; drop one");
             }
             let mut pass_args = vec!["generate"];
             pass_args.extend(flags.iter().filter(|f| !charset_flags.contains(f)));
@@ -394,7 +395,7 @@ fn print_help() {
     );
     entry("insert [-m] [-e] <entry>", "add an entry (interactive)");
     entry(
-        "generate [-n] [--url-safe|--hex|--digits] <entry> [len]",
+        "generate [-n] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
         "generate a password (-n alnum only, or pick a charset)",
     );
     entry("edit <entry>", "edit in $EDITOR");

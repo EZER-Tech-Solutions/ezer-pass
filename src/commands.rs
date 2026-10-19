@@ -3,6 +3,12 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::path::Path;
 
+/// Every command `run` understands, for completion and the TUI's command line.
+pub const COMMANDS: &[&str] = &[
+    "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "generate", "edit", "rm",
+    "mv", "cp", "find", "grep", "git", "help", "exit", "quit",
+];
+
 pub struct Session {
     pub store: store::Store,
     /// Current store directory ("" = root).
@@ -25,7 +31,7 @@ impl Session {
         }
     }
 
-    fn resolve(&self, input: &str) -> String {
+    pub fn resolve(&self, input: &str) -> String {
         store::resolve(&self.cwd, input)
     }
 
@@ -143,6 +149,12 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             }
         }
         "pwd" => println!("{}", store::display(&sess.cwd).blue().bold()),
+        "mkdir" => {
+            expect_args(&positional, "mkdir <path>", 1, 1)?;
+            let path = sess.resolve(positional[0]);
+            sess.store.mkdir(&path)?;
+            println!("created {}/", store::display(&path).blue().bold());
+        }
         "show" => {
             expect_args(&positional, "show [-c] <entry>", 1, 1)?;
             let clip = flags.iter().any(|f| *f == "-c" || *f == "--clip");
@@ -182,7 +194,9 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
                 _ => unreachable!(),
             });
             if charset.is_some() && flags.iter().any(|f| *f == "-n" || *f == "--no-symbols") {
-                bail!("-n/--no-symbols overrides --url-safe/--hex/--digits/--base-64 in pass; drop one");
+                bail!(
+                    "-n/--no-symbols overrides --url-safe/--hex/--digits/--base-64 in pass; drop one"
+                );
             }
             let mut pass_args = vec!["generate"];
             pass_args.extend(flags.iter().filter(|f| !charset_flags.contains(f)));
@@ -387,6 +401,10 @@ fn print_help() {
         "change directory (.., /, subdirs); bare dir names also work",
     );
     entry("pwd", "print the current store directory");
+    entry(
+        "mkdir <path>",
+        "create a directory (synced once it holds an entry)",
+    );
     println!();
     section("passwords (forwarded to pass, paths relative to the current directory)");
     entry(

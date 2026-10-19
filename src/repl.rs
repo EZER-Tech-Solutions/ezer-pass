@@ -1,4 +1,4 @@
-use crate::commands::{self, Outcome, Session};
+use crate::commands::{self, COMMANDS, Outcome, Session};
 use crate::{pass, store};
 use colored::Colorize;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -10,11 +10,6 @@ use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Context, Editor, Helper};
 use std::borrow::Cow;
 use std::path::PathBuf;
-
-const COMMANDS: &[&str] = &[
-    "ls", "cd", "pwd", "show", "insert", "import", "export", "generate", "edit", "rm", "mv", "cp",
-    "find", "grep", "git", "help", "exit", "quit",
-];
 
 struct EzerHelper {
     store: store::Store,
@@ -91,7 +86,8 @@ impl Completer for EzerHelper {
             return self.filename.complete(line, pos, ctx);
         }
 
-        let dirs_only = cmd == "cd" || (arg_index == 1 && !COMMANDS.contains(&cmd));
+        let dirs_only =
+            cmd == "cd" || cmd == "mkdir" || (arg_index == 1 && !COMMANDS.contains(&cmd));
         Ok((word_start, self.complete_store_path(word, dirs_only)))
     }
 }

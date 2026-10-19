@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -59,15 +59,23 @@ pub fn git_ahead_count(store_root: &Path) -> u64 {
     if !out.status.success() {
         return 0;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
-/// Decrypt an entry and capture its contents. Only stdout is captured: stdin
-/// and stderr stay on the terminal so gpg can locate the tty and pinentry
-/// (curses or otherwise) can prompt for the passphrase.
+/// Decrypt an entry and capture its contents.
 pub fn show(path: &str) -> Result<String> {
+    capture(&["show", "--", path])
+}
+
+/// Run pass and capture its stdout. Only stdout is captured: stdin and stderr
+/// stay on the terminal so gpg can locate the tty and pinentry (curses or
+/// otherwise) can prompt for the passphrase.
+pub fn capture(args: &[&str]) -> Result<String> {
     let child = pass_cmd()
-        .args(["show", "--", path])
+        .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -77,9 +85,50 @@ pub fn show(path: &str) -> Result<String> {
         .wait_with_output()
         .context("failed to wait for pass")?;
     if !out.status.success() {
-        bail!("pass show failed");
+        bail!("pass {} failed", args.first().unwrap_or(&""));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A pass command whose gpg may not prompt: with no cached passphrase (or a
+/// smartcard wanting its PIN) gpg fails instead of starting pinentry. pass
+/// splits `PASSWORD_STORE_GPG_OPTS` into gpg's arguments, so the extra flags
+/// ride along with any the user already set. Lets the TUI decrypt without
+/// giving up the terminal whenever gpg-agent has the passphrase cached.
+fn no_prompt_cmd(args: &[&str]) -> Command {
+    let mut opts = std::env::var("PASSWORD_STORE_GPG_OPTS").unwrap_or_default();
+    opts.push_str(" --batch --pinentry-mode error");
+    let mut cmd = pass_cmd();
+    cmd.args(args)
+        .env("PASSWORD_STORE_GPG_OPTS", opts.trim_start())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    cmd
+}
+
+/// `capture` that fails rather than prompting; see `no_prompt_cmd`.
+pub fn capture_no_prompt(args: &[&str]) -> Result<String> {
+    let out = no_prompt_cmd(args)
+        .output()
+        .context("failed to run `pass` (is it installed?)")?;
+    if !out.status.success() {
+        bail!("pass {} needs a passphrase", args.first().unwrap_or(&""));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Run pass, discarding its output, failing rather than prompting; see
+/// `no_prompt_cmd`. stdout goes to /dev/null instead of a pipe because
+/// `pass show -c` can leave a clipboard daemon (wl-copy) holding it open.
+pub fn run_no_prompt(args: &[&str]) -> Result<()> {
+    let status = no_prompt_cmd(args)
+        .stdout(Stdio::null())
+        .status()
+        .context("failed to run `pass` (is it installed?)")?;
+    if !status.success() {
+        bail!("pass {} needs a passphrase", args.first().unwrap_or(&""));
+    }
+    Ok(())
 }
 
 /// Write an entry by piping `content` to `pass insert -m -f` on stdin, so the

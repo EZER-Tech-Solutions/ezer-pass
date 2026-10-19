@@ -94,6 +94,64 @@ impl Store {
         nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
         Ok(nodes)
     }
+
+    /// Every entry and directory in the store as store paths, depth-first in
+    /// `list` order. Unreadable directories are skipped rather than failing
+    /// the whole walk.
+    pub fn walk(&self) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        let mut stack = vec![String::new()];
+        while let Some(dir) = stack.pop() {
+            let Ok(nodes) = self.list(&dir) else { continue };
+            let mut subdirs = Vec::new();
+            for node in nodes {
+                let path = if dir.is_empty() {
+                    node.name
+                } else {
+                    format!("{dir}/{}", node.name)
+                };
+                if node.is_dir {
+                    subdirs.push(path.clone());
+                }
+                out.push((path, node.is_dir));
+            }
+            stack.extend(subdirs.into_iter().rev());
+        }
+        out
+    }
+
+    /// Last modification time of an entry's `.gpg` file.
+    pub fn modified(&self, store_path: &str) -> Option<std::time::SystemTime> {
+        fs::metadata(self.root.join(format!("{store_path}.gpg")))
+            .and_then(|m| m.modified())
+            .ok()
+    }
+
+    /// Create a store directory (and any missing parents). pass itself has no
+    /// mkdir: directories normally appear when an entry is written into them,
+    /// and git won't track one until it holds an entry.
+    pub fn mkdir(&self, store_path: &str) -> Result<()> {
+        if store_path.is_empty() || self.is_dir(store_path) {
+            bail!("{} already exists", display(store_path));
+        }
+        if self.is_entry(store_path) {
+            bail!("{} is an entry", display(store_path));
+        }
+        // Refuse to create a directory below an entry name (e.g. `web1/x`
+        // when `web1` is an entry) — legal on disk but confusing in pass.
+        let mut prefix = String::new();
+        for part in store_path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            if self.is_entry(&prefix) {
+                bail!("{} is an entry, not a directory", display(&prefix));
+            }
+        }
+        fs::create_dir_all(self.dir_path(store_path))
+            .with_context(|| format!("cannot create {}", display(store_path)))
+    }
 }
 
 /// Resolve `input` against the current store directory `cwd`. Store paths are

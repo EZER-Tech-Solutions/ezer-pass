@@ -4,6 +4,9 @@ An interactive wrapper around [`pass`](https://www.passwordstore.org/), the stan
 unix password manager. It fixes the two things that make a deeply nested store
 painful: typing long entry paths, and storing anything that isn't text.
 
+- **TUI** — a full-screen browser: directory and preview panes, masked
+  passwords you reveal on demand, store-wide fuzzy search, and every command one
+  keystroke (or `:`) away.
 - **Explore mode** — a shell-like session that tracks a current directory inside
   your store: `cd servers`, `ls`, `show web1`, with tab completion and history.
 - **File entries** — import any file as a base64-encoded pass entry and export it
@@ -22,12 +25,50 @@ Requires `pass` and a working password store (`pass init <gpg-id>`).
 cargo install --path .
 ```
 
-## Explore mode
+## TUI
 
 Run `ezer-pass` with no arguments:
 
 ```
-$ ezer-pass
+ ezer-pass  /servers                                          origin/master ↑1
+┌ entries ──────────────────┐┌ /servers/web1 ──────────────────────────────────┐
+│ prod/                     ││••••••••••••  space to reveal                    │
+│▌web1                      ││user: alice                                      │
+│                           ││url: https://example.com                         │
+└───────────────────────────┘└─────────────────────────────────────────────────┘
+jk move  hl dirs  ⏎ open  space reveal  c copy  / search  : command  ? help  q quit
+```
+
+| Key | Action |
+|---|---|
+| `j` `k` / arrows | move (`PgUp` `PgDn` `Home` `End`) |
+| `l` / `→` / `Enter` | open a directory, or decrypt the selected entry |
+| `h` / `←` / `Backspace` | parent directory |
+| `space` | reveal / hide the password line |
+| `c` | copy the password (via `pass show -c`) |
+| `/` | fuzzy-search every entry and directory in the store |
+| `e` | edit in `$EDITOR` |
+| `d` | delete (asks first) |
+| `g` `i` `m` `r` `I` `x` | generate, insert, mkdir, rename, import, export — each opens the command line pre-filled |
+| `:` | run any explore-mode command (`:git log`, `:find bank`, `:cp a b`, ...) |
+| `R` / `?` / `q` | refresh / help / quit |
+
+- Only the first line of an entry (the password) is masked; the rest (`user:`,
+  `url:`, notes) is shown once decrypted. A revealed password re-masks after
+  `PASSWORD_STORE_CLIP_TIME` (45 s), and plaintext is dropped as soon as the
+  selection moves.
+- Decryption first runs with gpg's pinentry disabled, so when gpg-agent already
+  has your passphrase the screen never flickers. Otherwise the TUI steps aside
+  for pinentry, then comes straight back. The same hand-over happens for
+  `$EDITOR`, `pass insert` and command output; it all stays on the alternate
+  screen, so a freshly generated password doesn't linger in shell scrollback.
+
+## Explore mode
+
+Run `ezer-pass repl` for the line-based explorer:
+
+```
+$ ezer-pass repl
 ezer-pass — exploring /home/you/.password-store (`help` for commands)
 ezer:/ > ls
 apple/
@@ -55,6 +96,7 @@ hunter2
 |---|---|
 | `ls [path]` | list a store directory |
 | `cd [path]` / `pwd` | move around the store |
+| `mkdir <path>` | create a directory (pass has none; git tracks it once it holds an entry) |
 | `show [-c] <entry>` | print an entry, or `-c` to copy via pass |
 | `insert [-m] [-e] <entry>` | add an entry (interactive) |
 | `generate [-n] <entry> [len]` | generate a password |
@@ -72,13 +114,13 @@ Anything not listed (otp, init, ...) is out of scope — use plain `pass`.
 
 ## Git sync
 
-If the store is a git repository with a configured upstream, the interactive
-session keeps it synced automatically:
+If the store is a git repository with a configured upstream, the TUI and the
+explore session keep it synced automatically:
 
 - **On startup** it asks `pull from origin/master? [Y/n]` and runs
   `git pull --ff-only` on yes (a diverged store is reported and left for you to
   resolve; a failed pull never blocks the session).
-- **On exit** — `exit` or `Ctrl-D` — if you have unpushed commits, it asks
+- **On exit** — `q` in the TUI, `exit` or `Ctrl-D` in explore mode — if you have unpushed commits, it asks
   `push 2 commits to origin/master? [Y/n]` and pushes on yes.
 
 Stores without git (or without a remote) are left completely alone, and one-shot
@@ -113,6 +155,7 @@ refused without `--force` — a password store is a poor home for large blobs.
 | Variable | Effect |
 |---|---|
 | `PASSWORD_STORE_DIR` | store location (default `~/.password-store`), same as pass |
+| `PASSWORD_STORE_CLIP_TIME` | seconds before a revealed password re-masks in the TUI (default 45), same as pass's clipboard timeout |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |
 
 ## Development

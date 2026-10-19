@@ -203,13 +203,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             if charset_flags.len() > 1 {
                 bail!("only one of --url-safe, --hex, --digits, --base-64 may be given");
             }
-            let charset = charset_flags.first().map(|f| match **f {
-                "--url-safe" => "A-Za-z0-9_-",
-                "--hex" => "0-9a-f",
-                "--digits" => "0-9",
-                "--base-64" => "A-Za-z0-9+/",
-                _ => unreachable!(),
-            });
+            let charset = charset_flags.first().and_then(|f| charset(f));
             if charset.is_some() && flags.iter().any(|f| *f == "-n" || *f == "--no-symbols") {
                 bail!(
                     "-n/--no-symbols overrides --url-safe/--hex/--digits/--base-64 in pass; drop one"
@@ -352,6 +346,51 @@ fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
         print!("{content}");
     }
     Ok(())
+}
+
+/// The character set pass should draw from for one of ezer-pass's
+/// generate flags.
+fn charset(flag: &str) -> Option<&'static str> {
+    match flag {
+        "--url-safe" => Some("A-Za-z0-9_-"),
+        "--hex" => Some("0-9a-f"),
+        "--digits" => Some("0-9"),
+        "--base-64" => Some("A-Za-z0-9+/"),
+        _ => None,
+    }
+}
+
+/// `pass generate --clip`, for the TUI's generate form: the new password
+/// goes to the clipboard and never to the screen. `kind` is `-n` or a
+/// charset flag. `in_place` replaces only the first line of an existing
+/// entry. `quiet` runs it without the terminal, failing if gpg would prompt
+/// (as `in_place` can, since it decrypts the old entry).
+pub fn generate_to_clipboard(
+    path: &str,
+    kind: Option<&str>,
+    length: u32,
+    in_place: bool,
+    quiet: bool,
+) -> Result<()> {
+    let mut args = vec!["generate", "--clip"];
+    if in_place {
+        args.push("--in-place");
+    }
+    if kind == Some("-n") {
+        args.push("-n");
+    }
+    let length = length.to_string();
+    args.extend(["--", path, &length]);
+    let env: Vec<(&str, &str)> = kind
+        .and_then(charset)
+        .map(|set| ("PASSWORD_STORE_CHARACTER_SET", set))
+        .into_iter()
+        .collect();
+    if quiet {
+        pass::run_no_prompt_env(&args, &env)
+    } else {
+        pass::run_interactive_env(&args, &env)
+    }
 }
 
 /// Decrypt every entry (in `arg`, or the whole store) to find the file

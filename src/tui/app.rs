@@ -1,5 +1,7 @@
 use super::fuzzy;
+use super::generate::{self, Field, Form};
 use super::history::{self, History};
+use super::palette;
 use super::sync::{Op, Sync};
 use crate::commands::{self, COMMANDS, Session};
 use crate::{fileio, index, pass, repl, store};
@@ -28,6 +30,13 @@ pub enum Effect {
     Pull,
     /// `git push` with the terminal handed over, then quit.
     Push,
+    /// Generate a password straight to the clipboard (the `g` form).
+    Generate {
+        path: String,
+        kind: Option<&'static str>,
+        length: u32,
+        in_place: bool,
+    },
 }
 
 /// Commands to run one after another, stopping at the first failure.
@@ -125,10 +134,9 @@ pub enum Mode {
     },
     Confirm(Confirm),
     View(View),
-    /// The `?` popup, on its keys page or its `:` commands page.
-    Help {
-        commands: bool,
-    },
+    Help,
+    /// The `g` form.
+    Generate(Box<Form>),
     /// A background `git pull`/`push` and its progress popup.
     Sync(Sync),
     /// The store's git history (`u`).
@@ -164,6 +172,8 @@ pub struct App {
     pub exit_warning: Option<String>,
     history: Vec<String>,
     history_pos: Option<usize>,
+    /// The highlighted command-palette suggestion.
+    pub palette_sel: usize,
 }
 
 impl App {
@@ -202,6 +212,7 @@ impl App {
             exit_warning: None,
             history: Vec::new(),
             history_pos: None,
+            palette_sel: 0,
         };
         app.refresh_git();
         if app.upstream.is_some() {
@@ -450,6 +461,114 @@ impl App {
         }
     }
 
+    /// Keys for the generate form: Tab and ↑↓ between fields, ←→ (or
+    /// space) through the types, digits or ←→ +- for the length.
+    fn generate_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Generate(form) = &mut self.mode else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let before = (form.name.text.clone(), form.kind, form.length.text.clone());
+        match (form.field, key.code) {
+            (_, KeyCode::Esc) => {
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            (_, KeyCode::Char('c')) if ctrl => {
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            (_, KeyCode::Enter) => return self.submit_generate(),
+            (_, KeyCode::Tab | KeyCode::Down) => form.next_field(false),
+            (_, KeyCode::BackTab | KeyCode::Up) => form.next_field(true),
+            (Field::Name, _) => {
+                form.name.handle(key);
+            }
+            (Field::Kind, KeyCode::Left | KeyCode::Char('h')) => form.cycle_kind(true),
+            (Field::Kind, KeyCode::Right | KeyCode::Char('l' | ' ')) => form.cycle_kind(false),
+            (Field::Length, KeyCode::Left | KeyCode::Char('-')) => form.nudge_length(-1),
+            (Field::Length, KeyCode::Right | KeyCode::Char('+' | '=')) => form.nudge_length(1),
+            (Field::Length, KeyCode::Char(c)) if !c.is_ascii_digit() => {}
+            (Field::Length, _) => {
+                form.length.handle(key);
+            }
+            _ => {}
+        }
+        // Any change takes back an "⏎ again to replace" warning.
+        if before != (form.name.text.clone(), form.kind, form.length.text.clone()) {
+            form.error = None;
+            form.overwrite = false;
+        }
+        Effect::None
+    }
+
+    fn submit_generate(&mut self) -> Effect {
+        let store = &self.sess.store;
+        let Mode::Generate(form) = &mut self.mode else {
+            return Effect::None;
+        };
+        let name = form.name.text.trim();
+        if name.is_empty() {
+            form.error = Some("give it a name".into());
+            form.field = Field::Name;
+            return Effect::None;
+        }
+        let path = store::resolve(&form.folder, name);
+        if path.is_empty() || name.ends_with('/') || store.is_dir(&path) {
+            form.error = Some(format!(
+                "{} is a folder — add a name",
+                store::display(&path)
+            ));
+            form.field = Field::Name;
+            return Effect::None;
+        }
+        let Some(length) = form.length() else {
+            form.error = Some(format!("length must be 1 to {}", generate::MAX_LENGTH));
+            form.field = Field::Length;
+            return Effect::None;
+        };
+        let in_place = store.is_entry(&path);
+        if in_place && !form.overwrite {
+            form.overwrite = true;
+            form.error = Some(format!(
+                "{} exists — ⏎ again replaces its password (other lines are kept)",
+                store::display(&path)
+            ));
+            return Effect::None;
+        }
+        form.save_prefs();
+        let kind = generate::KINDS[form.kind].1;
+        self.mode = Mode::Browse;
+        Effect::Generate {
+            path,
+            kind,
+            length,
+            in_place,
+        }
+    }
+
+    /// The new password is on the clipboard: highlight it, start the
+    /// countdown, and open it masked in the view popup.
+    pub fn finish_generate(&mut self, path: String, result: Result<()>) -> Effect {
+        self.reload_files();
+        // Whatever was there, it now starts with a password.
+        self.sess.files.remove(&path);
+        self.sess.files.save(self.sess.store.root());
+        if let Some(f) = &mut self.filter {
+            f.index = self.sess.store.walk();
+        }
+        self.refresh_git();
+        if let Err(e) = result {
+            self.rebuild(None);
+            self.error(format!("{e:#}"));
+            return Effect::None;
+        }
+        self.go_to(&path);
+        self.last_copy = Some((path.clone(), Instant::now()));
+        self.push_recent(&path);
+        Effect::Decrypt(path)
+    }
+
     pub fn finish_decrypt(&mut self, path: String, result: Result<String>) {
         let content = match result {
             Ok(content) => content,
@@ -548,20 +667,11 @@ impl App {
             Mode::Rename { .. } => self.rename_key(key),
             Mode::Confirm(_) => self.confirm_key(key),
             Mode::View(_) => self.view_key(key),
-            Mode::Help { commands } => {
-                // Tab (or ← →) flips between the pages; anything else closes.
-                self.mode = match key.code {
-                    KeyCode::Tab
-                    | KeyCode::BackTab
-                    | KeyCode::Left
-                    | KeyCode::Right
-                    | KeyCode::Char('h' | 'l') => Mode::Help {
-                        commands: !commands,
-                    },
-                    _ => Mode::Browse,
-                };
+            Mode::Help => {
+                self.mode = Mode::Browse;
                 Effect::None
             }
+            Mode::Generate(_) => self.generate_key(key),
             Mode::Sync(_) => self.sync_key(key),
             Mode::History(_) => self.history_key(key),
         }
@@ -875,7 +985,9 @@ impl App {
                     self.export_prompt(&path);
                 }
             }
-            KeyCode::Char('g') => self.prefill("generate ".into()),
+            KeyCode::Char('g') => {
+                self.mode = Mode::Generate(Box::new(Form::new(self.context_dir())));
+            }
             KeyCode::Char('i') => self.prefill("insert ".into()),
             KeyCode::Char('m') => self.prefill("mkdir ".into()),
             KeyCode::Char('I') => self.prefill("import ".into()),
@@ -919,7 +1031,7 @@ impl App {
                 self.refresh_git();
                 self.info("refreshed");
             }
-            KeyCode::Char('?') => self.mode = Mode::Help { commands: false },
+            KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('u') => self.open_history(),
             _ => {}
         }
@@ -1061,6 +1173,7 @@ impl App {
     fn prefill(&mut self, text: String) {
         self.sess.cwd = self.context_dir();
         self.history_pos = None;
+        self.palette_sel = 0;
         self.mode = Mode::Command(Input::new(text));
     }
 
@@ -1181,6 +1294,19 @@ impl App {
             KeyCode::Char('c') if ctrl => self.mode = Mode::Browse,
             KeyCode::Backspace if input.text.is_empty() => self.mode = Mode::Browse,
             KeyCode::Enter => {
+                let palette = palette::suggest(&input.text, &self.sess.store, &self.sess.cwd);
+                // A command name that's still being typed (or needs
+                // arguments) completes instead of running.
+                let name = input.text.trim();
+                let complete = !input.text.contains(char::is_whitespace)
+                    && !palette.items.is_empty()
+                    && palette::find(name).is_none_or(|s| s.needs_args());
+                if complete {
+                    let i = self.palette_sel.min(palette.items.len() - 1);
+                    *input = Input::new(palette.items[i].line.clone());
+                    self.palette_sel = 0;
+                    return Effect::None;
+                }
                 let line = input.text.trim().to_string();
                 self.mode = Mode::Browse;
                 self.status = None;
@@ -1192,14 +1318,37 @@ impl App {
                 }
                 return self.run_line(&line);
             }
-            KeyCode::Up if !self.history.is_empty() => {
+            KeyCode::Tab | KeyCode::Up | KeyCode::Down | KeyCode::BackTab
+                if !palette::suggest(&input.text, &self.sess.store, &self.sess.cwd)
+                    .items
+                    .is_empty() =>
+            {
+                let items = palette::suggest(&input.text, &self.sess.store, &self.sess.cwd).items;
+                let n = items.len();
+                let sel = self.palette_sel.min(n - 1);
+                match key.code {
+                    KeyCode::Tab => {
+                        *input = Input::new(items[sel].line.clone());
+                        self.palette_sel = 0;
+                    }
+                    KeyCode::Up | KeyCode::BackTab => self.palette_sel = (sel + n - 1) % n,
+                    _ => self.palette_sel = (sel + 1) % n,
+                }
+            }
+            // History moved to Ctrl-P/Ctrl-N, with ↑↓ when nothing is
+            // suggested.
+            KeyCode::Up | KeyCode::Char('p')
+                if !self.history.is_empty() && (key.code == KeyCode::Up || ctrl) =>
+            {
                 let pos = self
                     .history_pos
                     .map_or(self.history.len() - 1, |p| p.saturating_sub(1));
                 self.history_pos = Some(pos);
                 *input = Input::new(self.history[pos].clone());
             }
-            KeyCode::Down if self.history_pos.is_some() => {
+            KeyCode::Down | KeyCode::Char('n')
+                if self.history_pos.is_some() && (key.code == KeyCode::Down || ctrl) =>
+            {
                 let pos = self.history_pos.unwrap() + 1;
                 if pos < self.history.len() {
                     self.history_pos = Some(pos);
@@ -1210,7 +1359,9 @@ impl App {
                 }
             }
             _ => {
-                input.handle(key);
+                if input.handle(key) {
+                    self.palette_sel = 0;
+                }
             }
         }
         Effect::None
@@ -1288,7 +1439,7 @@ impl App {
         let store = &self.sess.store;
         match cmd {
             "exit" | "quit" => self.request_quit(),
-            "help" | "?" => self.mode = Mode::Help { commands: true },
+            "help" | "?" => self.mode = Mode::Help,
             "pwd" => self.info(store::display(&self.sess.cwd)),
             "cd" | "ls" | "list" if positional.len() <= 1 => {
                 let path = self

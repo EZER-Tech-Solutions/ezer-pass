@@ -328,12 +328,18 @@ pub fn capture_no_prompt(args: &[&str]) -> Result<String> {
 /// `no_prompt_cmd`. stdout goes to /dev/null instead of a pipe because
 /// `pass show -c` can leave a clipboard daemon (wl-copy) holding it open.
 pub fn run_no_prompt(args: &[&str]) -> Result<()> {
+    run_no_prompt_env(args, &[])
+}
+
+/// `run_no_prompt` with extra environment variables set.
+pub fn run_no_prompt_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     let status = no_prompt_cmd(args)
+        .envs(env.iter().copied())
         .stdout(Stdio::null())
         .status()
         .context("failed to run `pass` (is it installed?)")?;
     if !status.success() {
-        bail!("pass {} needs a passphrase", args.first().unwrap_or(&""));
+        bail!("pass {} failed", args.first().unwrap_or(&""));
     }
     Ok(())
 }

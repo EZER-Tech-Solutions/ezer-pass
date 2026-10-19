@@ -1,5 +1,7 @@
 use super::app::{App, Confirm, Mode, Row, Secret, basename};
+use super::generate::{self, Field, Form};
 use super::history;
+use super::palette;
 use super::sync::{Op, Sync};
 use crate::{index, store};
 use ratatui::Frame;
@@ -52,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if matches!(
         app.mode,
-        Mode::Confirm(_) | Mode::View(_) | Mode::Help { .. } | Mode::Sync(_)
+        Mode::Confirm(_) | Mode::View(_) | Mode::Help | Mode::Sync(_) | Mode::Generate(_)
     ) {
         // Push everything behind a popup into the background.
         let area = f.area();
@@ -61,7 +63,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Confirm(confirm) => draw_confirm(f, confirm, app.upstream.as_deref()),
         Mode::View(_) => draw_view(f, app),
-        Mode::Help { commands } => draw_help(f, *commands),
+        Mode::Help => draw_help(f),
+        Mode::Generate(form) => draw_generate(f, form),
+        Mode::Command(input) => {
+            let palette = palette::suggest(&input.text, &app.sess.store, &app.sess.cwd);
+            draw_palette(f, footer, &palette, app.palette_sel);
+        }
         Mode::Sync(sync) => draw_sync(f, sync, app.upstream.as_deref()),
         _ => {}
     }
@@ -520,6 +527,10 @@ fn draw_view(f: &mut Frame, app: &App) {
     if let Some(t) = view.revealed_at {
         let left = app.clip_time.saturating_sub(t.elapsed()).as_secs() + 1;
         block = block.title_bottom(format!(" hides in {left}s ").fg(MARK));
+    } else if let Some((p, secs)) = app.clip_remaining()
+        && p == view.path
+    {
+        block = block.title_bottom(format!(" ⧉ copied · {secs}s ").fg(MARK));
     }
     let width = (f.area().width * 6 / 10).max(44);
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
@@ -1127,10 +1138,7 @@ fn confirm_box(f: &mut Frame, title: &str, question: &str, default_yes: bool) {
     );
 }
 
-fn draw_help(f: &mut Frame, commands: bool) {
-    if commands {
-        return draw_commands_help(f);
-    }
+fn draw_help(f: &mut Frame) {
     let groups: &[(&str, &[(&str, &str)])] = &[
         (
             "move",
@@ -1179,7 +1187,7 @@ fn draw_help(f: &mut Frame, commands: bool) {
         (
             "more",
             &[
-                (":", "any command (:git log, :find …)"),
+                (":", "commands (type to narrow them)"),
                 ("R", "refresh"),
                 ("q", "quit (offers to push)"),
             ],
@@ -1205,7 +1213,9 @@ fn draw_help(f: &mut Frame, commands: bool) {
     const COL: u16 = 46;
     let screen = f.area();
     let two = screen.width >= 2 * COL + 6;
-    let block = help_block(false);
+    let block = popup(Line::from(" keys ").bold(), ACCENT)
+        .title_bottom(Line::from(" any key closes ".dim()).right_aligned())
+        .padding(Padding::new(2, 2, 1, 1));
     if two {
         let left = column(&groups[..2]);
         let right = column(&groups[2..]);
@@ -1227,104 +1237,150 @@ fn draw_help(f: &mut Frame, commands: bool) {
     }
 }
 
-/// The `?` popup's frame: the two pages as tabs in the title.
-fn help_block(commands: bool) -> Block<'static> {
-    let tab = |name: &'static str, active: bool| -> Span<'static> {
-        if active {
-            format!(" {name} ").fg(ACCENT).bg(SHADE).bold()
+/// The command palette, just above the command line: matching commands
+/// while the name is typed, then the command's usage and matching paths.
+/// At most `ROWS` suggestions, scrolled to keep the selection in view.
+fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selected: usize) {
+    const ROWS: usize = 8;
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(spec) = palette.command {
+        lines.push(Line::from(vec![
+            format!(":{} ", spec.name).fg(ACCENT).bold(),
+            spec.usage.to_string().fg(ACCENT),
+            format!("  {}", spec.desc).dim(),
+        ]));
+    }
+    let selected = selected.min(palette.items.len().saturating_sub(1));
+    let start = selected.saturating_sub(ROWS - 1);
+    let width = footer.width.min(96);
+    for (i, s) in palette.items.iter().enumerate().skip(start).take(ROWS) {
+        let bar = if i == selected {
+            BAR.fg(ACCENT)
         } else {
-            format!(" {name} ").dim()
+            " ".into()
+        };
+        let mut spans = vec![bar];
+        match &s.item {
+            palette::Item::Command(spec) => {
+                spans.push(format!("{:<9}", spec.name).fg(ACCENT).bold());
+                let usage = truncate(spec.usage, 34);
+                spans.push(format!("{usage:<35}").dim());
+                spans.push(spec.desc.into());
+            }
+            palette::Item::Path { label, is_dir } => {
+                if *is_dir {
+                    spans.push(folder_icon(false).fg(DIR));
+                    spans.push(label.clone().fg(DIR).bold());
+                } else {
+                    spans.push("• ".dim());
+                    spans.push(label.clone().into());
+                }
+            }
         }
-    };
-    let mut keys = hint(&[
-        ("tab", if commands { "keys" } else { "commands" }),
-        ("esc", "close"),
-    ]);
+        let mut line = Line::from(spans);
+        if i == selected {
+            line = line.bg(SHADE);
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return;
+    }
+    let more = palette.items.len().saturating_sub(start + ROWS);
+    let height = (lines.len() as u16 + 2).min(footer.y);
+    let area = Rect::new(footer.x, footer.y - height, width, height);
+    let mut keys = hint(&[("↑↓", "pick"), ("tab", "complete"), ("⏎", "run")]);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    popup(
-        Line::from(vec![
-            " ".into(),
-            tab("keys", !commands),
-            " ".into(),
-            tab("commands", commands),
-            " ".into(),
-        ]),
-        ACCENT,
-    )
-    .title_bottom(keys.right_aligned())
-    .padding(Padding::new(2, 2, 1, 1))
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT))
+        .title_bottom(keys.right_aligned());
+    if more > 0 {
+        block = block.title_bottom(format!(" {more} more ").dim());
+    }
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// The commands page: everything `:` takes, grouped like `help` in the REPL.
-fn draw_commands_help(f: &mut Frame) {
-    let groups: &[(&str, &[(&str, &str)])] = &[
-        (
-            "navigate",
-            &[
-                ("cd | ls [path]", "go to a folder in the tree"),
-                ("mkdir <path>", "create a folder"),
-                ("pwd", "show the current folder"),
-            ],
-        ),
-        (
-            "entries",
-            &[
-                ("show [-c] <entry>", "view an entry, or -c to copy it"),
-                ("insert [-m] [-e] <entry>", "add an entry"),
-                ("generate [-n] <entry> [len]", "generate a password"),
-                ("edit <entry>", "edit in $EDITOR"),
-                ("mv <src> <dest>", "rename or move"),
-                ("cp <src> <dest>", "copy"),
-                ("rm [-r] <path>", "delete an entry or folder"),
-            ],
-        ),
-        (
-            "files",
-            &[
-                (
-                    "import [--force] <file> <entry>",
-                    "store a file as an entry",
-                ),
-                ("export [-f] <entry> [dest]", "write a file entry to disk"),
-                ("reindex [path]", "find file entries made before ezer-pass"),
-            ],
-        ),
-        (
-            "search & git",
-            &[
-                ("find <terms>", "search entry names"),
-                ("grep <pattern>", "search inside decrypted entries"),
-                ("git <git-args>", "run git in the store"),
-            ],
-        ),
-        (
-            "session",
-            &[("help", "this page"), ("quit", "leave (offers to push)")],
-        ),
-    ];
-    const USAGE: usize = 33;
-    let mut lines: Vec<Line> = Vec::new();
-    for (name, rows) in groups {
-        lines.push(Line::from(name.to_uppercase()).fg(DIR).bold());
-        for (usage, desc) in rows.iter() {
-            lines.push(Line::from(vec![
-                ":".fg(ACCENT).bold(),
-                format!("{usage:<USAGE$}").fg(ACCENT),
-                desc.to_string().into(),
-            ]));
+/// The `g` form.
+fn draw_generate(f: &mut Frame, form: &Form) {
+    let label = |name: &str, field: Field| -> Vec<Span<'static>> {
+        if form.field == field {
+            vec![BAR.fg(ACCENT), format!("{name:<8}").fg(ACCENT).bold()]
+        } else {
+            vec![" ".into(), format!("{name:<8}").dim()]
         }
-        lines.push("".into());
+    };
+    let folder = format!("{}/", store::display(&form.folder).trim_end_matches('/'));
+    let mut name = label("name", Field::Name);
+    name.push(folder.clone().dim());
+    name.push(form.name.text.clone().bold());
+
+    let mut kind = label("type", Field::Kind);
+    // Every option keeps its padding, so nothing shifts as the choice moves.
+    for (i, (k, _)) in generate::KINDS.iter().enumerate() {
+        kind.push(if i == form.kind {
+            format!(" {k} ").fg(ACCENT).bg(SHADE).bold()
+        } else {
+            format!(" {k} ").dim()
+        });
     }
-    lines.push(
-        "paths are relative to the highlighted folder; /abs and ../ work"
+
+    let mut length = label("length", Field::Length);
+    length.push(form.length.text.clone().bold());
+    length.push("  characters".dim());
+
+    let mut lines = vec![
+        Line::from(name),
+        "".into(),
+        Line::from(kind),
+        "".into(),
+        Line::from(length),
+    ];
+    lines.push("".into());
+    lines.push(match &form.error {
+        Some(e) if form.overwrite => Line::from(e.clone().fg(MARK)),
+        Some(e) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
+        None => "copied to the clipboard, never shown unless you reveal it"
             .dim()
             .into(),
-    );
-    let width = (1 + USAGE + 42 + 6) as u16;
+    });
+
+    let mut keys = match form.field {
+        Field::Kind => hint(&[
+            ("←→", "type"),
+            ("tab", "next"),
+            ("⏎", "generate"),
+            ("esc", "cancel"),
+        ]),
+        Field::Length => hint(&[
+            ("←→", "±1"),
+            ("tab", "next"),
+            ("⏎", "generate"),
+            ("esc", "cancel"),
+        ]),
+        Field::Name => hint(&[("tab", "next"), ("⏎", "generate"), ("esc", "cancel")]),
+    };
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let block = popup(Line::from(" generate ").bold(), ACCENT)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(1, 2, 1, 1));
+    let width = 82.min(f.area().width);
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(help_block(true)), area);
+    let inner = block.inner(area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
+
+    // The cursor sits in whichever text field is focused.
+    let (row, col) = match form.field {
+        Field::Name => (0, folder.chars().count() + form.name.cursor_col()),
+        Field::Length => (4, form.length.cursor_col()),
+        Field::Kind => return,
+    };
+    let x = inner.x + 1 + 8 + col as u16;
+    f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y + row));
 }
 
 /// The store root for the tree's title: `~` for $HOME, and cut from the

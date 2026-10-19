@@ -4,7 +4,9 @@
 
 mod app;
 mod fuzzy;
+mod generate;
 mod history;
+mod palette;
 mod sync;
 mod ui;
 
@@ -93,6 +95,27 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
                 (done, result)
             })?;
             app.finish_run(&batch, done, result);
+        }
+        Effect::Generate {
+            path,
+            kind,
+            length,
+            in_place,
+        } => {
+            let quiet = commands::generate_to_clipboard(&path, kind, length, in_place, true);
+            // Only replacing in place decrypts the old entry, so only then
+            // can a failure be a passphrase prompt worth a retry. Retrying
+            // anything else could generate twice.
+            let result = match quiet {
+                Err(_) if in_place => suspended(terminal, || {
+                    pause_on_err(commands::generate_to_clipboard(
+                        &path, kind, length, in_place, false,
+                    ))
+                })?,
+                other => other,
+            };
+            let next = app.finish_generate(path, result);
+            perform(terminal, app, next)?;
         }
         Effect::Pull => {
             let result = suspended(terminal, || {

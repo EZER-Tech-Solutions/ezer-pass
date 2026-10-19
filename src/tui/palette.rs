@@ -1,0 +1,199 @@
+//! The `:` command palette: suggestions above the command line that narrow
+//! as you type — command names first, then entries and folders for a
+//! command's path argument.
+
+use super::fuzzy;
+use crate::store::{self, Store};
+
+/// What a command's arguments are, for path suggestions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Arg {
+    None,
+    /// Any store path (entries and folders).
+    Path,
+    /// Folders only.
+    Dir,
+}
+
+pub struct Spec {
+    pub name: &'static str,
+    /// The arguments, as shown after the name.
+    pub usage: &'static str,
+    pub desc: &'static str,
+    pub arg: Arg,
+}
+
+impl Spec {
+    /// Whether the command does nothing useful without arguments.
+    pub fn needs_args(&self) -> bool {
+        self.usage.contains('<')
+    }
+}
+
+/// Every command the TUI's command line takes, most used first.
+pub const SPECS: &[Spec] = &[
+    spec(
+        "generate",
+        "[-n] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
+        "generate a password",
+        Arg::Path,
+    ),
+    spec("insert", "[-m] [-e] <entry>", "add an entry", Arg::Path),
+    spec(
+        "show",
+        "[-c] <entry>",
+        "view an entry, or -c to copy it",
+        Arg::Path,
+    ),
+    spec("edit", "<entry>", "edit in $EDITOR", Arg::Path),
+    spec("mv", "<src> <dest>", "rename or move", Arg::Path),
+    spec("cp", "<src> <dest>", "copy", Arg::Path),
+    spec("rm", "[-r] <path>", "delete an entry or folder", Arg::Path),
+    spec("mkdir", "<path>", "create a folder", Arg::Dir),
+    spec("ls", "[path]", "go to a folder in the tree", Arg::Dir),
+    spec("cd", "[path]", "go to a folder in the tree", Arg::Dir),
+    spec(
+        "import",
+        "[--force] <file> <entry>",
+        "store a file as an entry",
+        Arg::None,
+    ),
+    spec(
+        "export",
+        "[-f] <entry> [dest]",
+        "write a file entry to disk",
+        Arg::Path,
+    ),
+    spec(
+        "reindex",
+        "[path]",
+        "find file entries made before ezer-pass",
+        Arg::Dir,
+    ),
+    spec("find", "<terms>", "search entry names", Arg::None),
+    spec(
+        "grep",
+        "<pattern>",
+        "search inside decrypted entries",
+        Arg::None,
+    ),
+    spec("git", "<git-args>", "run git in the store", Arg::None),
+    spec("pwd", "", "show the current folder", Arg::None),
+    spec("help", "", "list the keys", Arg::None),
+    spec("quit", "", "leave (offers to push)", Arg::None),
+];
+
+const fn spec(name: &'static str, usage: &'static str, desc: &'static str, arg: Arg) -> Spec {
+    Spec {
+        name,
+        usage,
+        desc,
+        arg,
+    }
+}
+
+pub fn find(name: &str) -> Option<&'static Spec> {
+    SPECS.iter().find(|s| s.name == name)
+}
+
+pub enum Item {
+    Command(&'static Spec),
+    /// A store path to complete to; `label` is what was typed plus the
+    /// rest of the name.
+    Path {
+        label: String,
+        is_dir: bool,
+    },
+}
+
+pub struct Suggestion {
+    pub item: Item,
+    /// The whole command line once this suggestion is taken.
+    pub line: String,
+}
+
+pub struct Palette {
+    /// The command being typed, once its name is complete.
+    pub command: Option<&'static Spec>,
+    pub items: Vec<Suggestion>,
+}
+
+/// Suggestions for the command line `text`, with relative paths resolved
+/// against `cwd`.
+pub fn suggest(text: &str, store: &Store, cwd: &str) -> Palette {
+    let Some((name, _)) = text.split_once(char::is_whitespace) else {
+        // Still typing the command's name.
+        let mut ranked: Vec<(i64, usize, &'static Spec)> = SPECS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| fuzzy::score(text, s.name).map(|score| (score, i, s)))
+            .collect();
+        ranked.sort_by_key(|&(score, i, _)| (-score, i));
+        return Palette {
+            command: None,
+            items: ranked
+                .into_iter()
+                .map(|(_, _, s)| Suggestion {
+                    item: Item::Command(s),
+                    line: format!("{} ", s.name),
+                })
+                .collect(),
+        };
+    };
+    let command = find(name);
+    let mut items = Vec::new();
+    // The word being typed: everything after the last space.
+    let start = text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let word = &text[start..];
+    if let Some(spec) = command
+        && spec.arg != Arg::None
+        && !word.starts_with('-')
+    {
+        let (dir_part, prefix) = match word.rfind('/') {
+            Some(i) => word.split_at(i + 1),
+            None => ("", word),
+        };
+        let folder = store::resolve(cwd, dir_part);
+        let mut ranked: Vec<(i64, String, bool)> = store
+            .list(&folder)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| spec.arg == Arg::Path || n.is_dir)
+            .filter_map(|n| fuzzy::score(prefix, &n.name).map(|s| (s, n.name, n.is_dir)))
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
+        for (_, child, is_dir) in ranked {
+            let label = format!("{dir_part}{child}{}", if is_dir { "/" } else { "" });
+            // A folder stays open for more typing; an entry is a whole word.
+            let line = format!("{}{label}{}", &text[..start], if is_dir { "" } else { " " });
+            items.push(Suggestion {
+                item: Item::Path { label, is_dir },
+                line,
+            });
+        }
+    }
+    Palette { command, items }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_spec_is_a_real_command() {
+        for s in SPECS {
+            assert!(
+                crate::commands::COMMANDS.contains(&s.name),
+                "{} is not a command",
+                s.name
+            );
+        }
+    }
+
+    #[test]
+    fn needs_args() {
+        assert!(find("mv").unwrap().needs_args());
+        assert!(!find("reindex").unwrap().needs_args());
+        assert!(!find("pwd").unwrap().needs_args());
+    }
+}

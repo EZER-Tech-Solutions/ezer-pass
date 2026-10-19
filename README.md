@@ -69,10 +69,11 @@ highlighted row (password, file, folder), and while items are marked or cut.
 | `d` | delete the marked (or highlighted) items, after asking |
 | `u` | history: undo any past change, or roll the store back to a point |
 | `e` | edit in `$EDITOR` |
-| `g` `i` `m` `I` `E` | generate, insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
-| `:` | run any explore-mode command (`:git log`, `:find bank`, ...) |
+| `g` | generate a password in the highlighted folder: pick name, type (symbols, letters & digits, url-safe, hex, digits, base-64) and length; it goes straight to the clipboard and opens masked, never printed. Type and length are remembered; on an existing entry it replaces only the password line |
+| `i` `m` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
+| `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
 | `Esc` | clear the filter, then marks, then the buffer |
-| `R` / `?` / `q` | refresh / help (`Tab` flips between keys and `:` commands) / quit |
+| `R` / `?` / `q` | refresh / help / quit |
 
 - Pasting moves with `pass mv` / copies with `pass cp`, so entries are
   re-encrypted when they land under a different `.gpg-id` and every change is

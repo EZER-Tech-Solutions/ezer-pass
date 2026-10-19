@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -93,28 +94,135 @@ pub fn git_head(store_root: &Path) -> Option<String> {
     git_quiet(store_root, &["rev-parse", "--verify", "-q", "HEAD"]).ok()
 }
 
-/// Undo the commits in `base..tip` with one new commit. Refuses if the store
-/// has uncommitted changes, and on any failure (a conflict with later
-/// changes, a signing prompt it can't show) puts the store back exactly as
-/// it was.
-pub fn git_revert(store_root: &Path, base: &str, tip: &str, message: &str) -> Result<()> {
-    if !git_quiet(
+/// Make one change to the store as a new commit: `stage` puts it in the
+/// index and work tree, then it is committed with `message`. Refuses if the
+/// store has uncommitted changes, and on any failure (a conflict with later
+/// changes, nothing to change, a signing prompt it can't show) puts the
+/// store back exactly as it was.
+fn git_commit_change(
+    store_root: &Path,
+    message: &str,
+    stage: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    let status = git_quiet(
         store_root,
         &["status", "--porcelain", "--untracked-files=no"],
-    )?
-    .is_empty()
-    {
+    )?;
+    if !status.is_empty() {
         bail!("the store has uncommitted changes");
     }
     let head = git_head(store_root).context("the store has no commits")?;
-    let range = format!("{base}..{tip}");
-    let result = git_quiet(store_root, &["revert", "--no-commit", &range])
-        .and_then(|_| git_quiet(store_root, &["commit", "-q", "-m", message]));
+    let result = stage().and_then(|_| git_quiet(store_root, &["commit", "-q", "-m", message]));
     if result.is_err() {
         let _ = git_quiet(store_root, &["revert", "--quit"]);
         let _ = git_quiet(store_root, &["reset", "-q", "--hard", &head]);
     }
     result.map(|_| ())
+}
+
+/// Undo one commit with a new one.
+pub fn git_undo(store_root: &Path, hash: &str, message: &str) -> Result<()> {
+    git_commit_change(store_root, message, || {
+        git_quiet(store_root, &["revert", "--no-commit", hash])
+    })
+}
+
+/// Put every file back as it was at commit `hash`, as a new commit.
+pub fn git_restore(store_root: &Path, hash: &str, message: &str) -> Result<()> {
+    git_commit_change(store_root, message, || {
+        git_quiet(store_root, &["read-tree", "--reset", "-u", hash])
+    })
+}
+
+pub struct Commit {
+    pub hash: String,
+    pub short: String,
+    /// Commit time, seconds since the epoch.
+    pub time: u64,
+    pub author: String,
+    pub parents: usize,
+    pub subject: String,
+}
+
+/// The newest `limit` commits of the store, newest first.
+pub fn git_log(store_root: &Path, limit: usize) -> Result<Vec<Commit>> {
+    let out = git_quiet(
+        store_root,
+        &[
+            "log",
+            &format!("-n{limit}"),
+            "--format=%H%x1f%h%x1f%ct%x1f%an%x1f%P%x1f%s",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.splitn(6, '\x1f').collect();
+            let [hash, short, time, author, parents, subject] = f[..] else {
+                return None;
+            };
+            Some(Commit {
+                hash: hash.into(),
+                short: short.into(),
+                time: time.parse().unwrap_or(0),
+                author: author.into(),
+                parents: parents.split_whitespace().count(),
+                subject: subject.into(),
+            })
+        })
+        .collect())
+}
+
+/// Commits not yet on the upstream; empty without one.
+pub fn git_unpushed(store_root: &Path) -> HashSet<String> {
+    git_quiet(store_root, &["rev-list", "@{upstream}..HEAD"])
+        .map(|out| out.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// One file a commit touched: `status` is git's letter (A, D, M, R, ...),
+/// and `to` the new name of a rename.
+pub struct FileChange {
+    pub status: char,
+    pub path: String,
+    pub to: Option<String>,
+}
+
+/// What `commit` changed, against its first parent.
+pub fn git_changes(store_root: &Path, commit: &Commit) -> Result<Vec<FileChange>> {
+    let parent = format!("{}^", commit.hash);
+    let args: Vec<&str> = if commit.parents == 0 {
+        vec![
+            "diff-tree",
+            "-r",
+            "-z",
+            "-M",
+            "--name-status",
+            "--root",
+            "--no-commit-id",
+            &commit.hash,
+        ]
+    } else {
+        vec!["diff", "-z", "-M", "--name-status", &parent, &commit.hash]
+    };
+    let out = git_quiet(store_root, &args)?;
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut changes = Vec::new();
+    while let Some(code) = fields.next() {
+        let status = code.chars().next().unwrap_or('?');
+        let Some(path) = fields.next() else { break };
+        let to = if matches!(status, 'R' | 'C') {
+            fields.next().map(str::to_string)
+        } else {
+            None
+        };
+        changes.push(FileChange {
+            status,
+            path: path.to_string(),
+            to,
+        });
+    }
+    Ok(changes)
 }
 
 /// The store's upstream branch (e.g. "origin/master"), if the store is a git

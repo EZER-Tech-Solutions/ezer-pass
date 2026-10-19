@@ -4,6 +4,7 @@
 
 mod app;
 mod fuzzy;
+mod history;
 mod sync;
 mod ui;
 
@@ -74,7 +75,6 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
             app.finish_copy(&path, result);
         }
         Effect::Run(batch) => {
-            let before = pass::git_head(app.sess.store.root());
             let (done, result) = suspended(terminal, || {
                 let mut done = 0;
                 let mut result = Ok(());
@@ -92,7 +92,7 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
                 }
                 (done, result)
             })?;
-            app.finish_run(&batch, done, result, before);
+            app.finish_run(&batch, done, result);
         }
         Effect::Pull => {
             let result = suspended(terminal, || {

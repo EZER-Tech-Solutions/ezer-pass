@@ -1,4 +1,5 @@
 use super::app::{App, Confirm, Mode, Row, Secret, basename};
+use super::history;
 use super::sync::{Op, Sync};
 use crate::{index, store};
 use ratatui::Frame;
@@ -25,6 +26,9 @@ const BAR: &str = "▌";
 const LABEL: usize = 8;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    if let Mode::History(_) = app.mode {
+        return draw_history(f, app);
+    }
     let [tree, bottom, footer] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(7),
@@ -723,6 +727,200 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
             true,
         ),
     };
+    confirm_box(f, title, &question, default_yes);
+}
+
+/// The history view: commits on the left, what the highlighted one
+/// changed on the right.
+fn draw_history(f: &mut Frame, app: &mut App) {
+    let [main, footer] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(main);
+    app.page = left.height.saturating_sub(2) as usize;
+    let has_upstream = app.upstream.is_some();
+    let files = &app.sess.files;
+    let Mode::History(h) = &mut app.mode else {
+        return;
+    };
+
+    // Commits.
+    let width = left.width.saturating_sub(2) as usize;
+    let selected = h.list.selected();
+    // Times right-aligned in one column, so subjects line up.
+    let when_width = h
+        .commits
+        .iter()
+        .map(|c| ago(commit_time(c.time)).chars().count())
+        .max()
+        .unwrap_or(0);
+    let items: Vec<ListItem> = h
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let bar = if selected == Some(i) {
+                BAR.fg(ACCENT)
+            } else {
+                " ".into()
+            };
+            let flag = if h.unpushed.contains(&c.hash) {
+                "↑ ".fg(MARK)
+            } else {
+                "  ".into()
+            };
+            let when = format!("{:>when_width$}", ago(commit_time(c.time)));
+            let room = width.saturating_sub(1 + 2 + when_width + 2);
+            let subject = truncate(&c.subject, room);
+            let gap = room.saturating_sub(subject.chars().count()) + 2;
+            let mut subject = match ["Undo: ", "Redo: ", "Roll back "]
+                .iter()
+                .any(|p| c.subject.starts_with(p))
+            {
+                true => subject.fg(Color::Cyan),
+                false => subject.into(),
+            };
+            if selected == Some(i) {
+                subject = subject.reversed().bold();
+            }
+            ListItem::new(Line::from(vec![
+                bar,
+                flag,
+                subject,
+                " ".repeat(gap).into(),
+                when.dim(),
+            ]))
+        })
+        .collect();
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Line::from(vec![
+            " history ".fg(Color::Black).bg(ACCENT).bold(),
+            " ".into(),
+        ]))
+        .border_style(Style::new().dim());
+    if !h.unpushed.is_empty() {
+        block = block.title_top(
+            Line::from(format!(" ↑ {} not pushed ", h.unpushed.len()).fg(MARK)).right_aligned(),
+        );
+    }
+    if let Some(i) = selected {
+        block = block.title_bottom(
+            Line::from(format!(" {}/{} ", i + 1, h.commits.len()).dim()).right_aligned(),
+        );
+    }
+    f.render_stateful_widget(
+        List::new(items).block(block).scroll_padding(2),
+        left,
+        &mut h.list,
+    );
+
+    // What the highlighted commit changed.
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(c) = h.selected() {
+        lines.push(Line::from(vec![
+            c.short.clone().fg(MARK),
+            format!(" · {} · {}", c.author, ago(commit_time(c.time))).dim(),
+        ]));
+        if has_upstream {
+            lines.push(if h.unpushed.contains(&c.hash) {
+                "↑ not pushed yet".fg(MARK).into()
+            } else {
+                "✓ pushed".dim().into()
+            });
+        }
+        if c.parents > 1 {
+            lines.push("merge".fg(DIR).into());
+        }
+        lines.push("".into());
+        if h.changes.is_empty() {
+            lines.push("no file changes".dim().into());
+        }
+        for change in &h.changes {
+            let (sign, color) = match change.status {
+                'A' | 'C' => ("+ ", ACCENT),
+                'D' => ("− ", DANGER),
+                'R' => ("→ ", DIR),
+                _ => ("~ ", MARK),
+            };
+            let name = |file: &str| -> Vec<Span<'static>> {
+                match history::store_path(file) {
+                    Some(p) => {
+                        let style = if files.is_file(&p) {
+                            Style::new().fg(FILE)
+                        } else {
+                            Style::new()
+                        };
+                        path_spans(&p, style)
+                    }
+                    None => vec![file.to_string().dim()],
+                }
+            };
+            let mut spans = vec![sign.fg(color).bold()];
+            spans.extend(name(&change.path));
+            if let Some(to) = &change.to {
+                spans.push(" → ".fg(DIR));
+                spans.extend(name(to));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(pane("changes").padding(Padding::horizontal(1))),
+        right,
+    );
+
+    // Footer.
+    let line = match &app.status {
+        Some(s) if s.error => Line::from(vec!["✗ ".fg(DANGER).bold(), s.text.as_str().fg(DANGER)]),
+        Some(s) => Line::from(s.text.as_str().fg(ACCENT)),
+        None => hint_fit(
+            &[
+                ("j k", "move"),
+                ("u", "undo this change"),
+                ("⏎", "roll back to here"),
+                ("esc", "back"),
+            ],
+            footer.width as usize,
+        ),
+    };
+    f.render_widget(Paragraph::new(line), footer);
+
+    let Mode::History(h) = &app.mode else {
+        return;
+    };
+    if h.confirm
+        && let (Some(i), Some(c)) = (h.list.selected(), h.selected())
+    {
+        let area = f.area();
+        f.buffer_mut().set_style(area, Style::new().dim());
+        let question = format!(
+            "put the store back as it was at \"{}\" ({})? The {i} newer change{} \
+             are undone together as one new commit.",
+            c.subject,
+            ago(commit_time(c.time)),
+            if i == 1 { "" } else { "s" },
+        );
+        confirm_box(f, "roll back", &question, false);
+    }
+}
+
+fn commit_time(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+/// `s` cut to `max` characters, with an ellipsis if it was longer.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// A yes/no question in a popup, colored by its default answer.
+fn confirm_box(f: &mut Frame, title: &str, question: &str, default_yes: bool) {
     let color = if default_yes { ACCENT } else { DANGER };
     // The default answer is a filled button; the other is plain.
     let button = |key: &str, label: &str, default: bool| -> Vec<Span<'static>> {
@@ -737,21 +935,32 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
     buttons.push("   ".into());
     buttons.extend(button("n", "no", !default_yes));
 
-    let width = (question.chars().count() + 8).clamp(36, f.area().width as usize) as u16;
+    let width = (question.chars().count() + 8)
+        .clamp(36, 72)
+        .min(f.area().width as usize) as u16;
     let text_rows = question
         .chars()
         .count()
         .div_ceil(width.saturating_sub(4).max(1) as usize);
+    // Word wrapping can take a row more than the plain estimate.
+    let text_rows = if text_rows > 1 {
+        text_rows + 1
+    } else {
+        text_rows
+    };
     let area = popup_fixed(f.area(), width, text_rows as u16 + 5);
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(vec![Line::from(question), "".into(), Line::from(buttons)])
-            .centered()
-            .wrap(Wrap { trim: true })
-            .block(
-                popup(Line::from(format!(" {title} ")).bold(), color)
-                    .padding(Padding::new(1, 1, 1, 0)),
-            ),
+        Paragraph::new(vec![
+            Line::from(question.to_string()),
+            "".into(),
+            Line::from(buttons),
+        ])
+        .centered()
+        .wrap(Wrap { trim: true })
+        .block(
+            popup(Line::from(format!(" {title} ")).bold(), color).padding(Padding::new(1, 1, 1, 0)),
+        ),
         area,
     );
 }
@@ -789,7 +998,7 @@ fn draw_help(f: &mut Frame) {
                 ("p", "paste into highlighted folder"),
                 ("r", "rename in place"),
                 ("d", "delete marked or highlighted"),
-                ("u  U", "undo / redo a change (this session)"),
+                ("u", "history: undo or roll back changes"),
                 ("esc", "clear filter, marks, then buffer"),
             ],
         ),

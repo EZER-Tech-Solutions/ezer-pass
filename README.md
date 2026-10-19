@@ -65,7 +65,7 @@ of the highlighted row, the cut/copy buffer, marks, and git sync state.
 | `x` / `y` / `p` | cut / copy the marked (or highlighted) items, paste into the highlighted folder |
 | `r` | rename in place (`../x` and `/abs/path` move it) |
 | `d` | delete the marked (or highlighted) items, after asking |
-| `u` / `U` | undo / redo a change made in this session (`Ctrl-R` also redoes) |
+| `u` | history: undo any past change, or roll the store back to a point |
 | `e` | edit in `$EDITOR` |
 | `g` `i` `m` `I` `E` | generate, insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | run any explore-mode command (`:git log`, `:find bank`, ...) |
@@ -154,15 +154,35 @@ popup then shows git's output and `r` retries with the terminal handed over,
 where prompts work. A failed push on exit offers `q` to quit anyway (your
 commits stay local) or `esc` to go back.
 
-`u` in the TUI undoes the last change made in the session — a delete, move,
-rename, paste, edit, generate, insert or import — by reverting the commits pass
-made for it, as one new `Undo: …` commit; `U` redoes it the same way. Because
-undo adds a commit rather than rewriting history, it works after a push too.
-If later changes conflict with the undo, nothing is changed. Undo needs the
-store in git; `:git` commands themselves aren't undoable.
-
 Stores without git (or without a remote) are left completely alone, and one-shot
 commands never touch git.
+
+## History and undo
+
+Every change pass makes is a git commit, so `u` in the TUI opens the store's
+history — from any session or machine, not just this one:
+
+```
+╭ history ───────────────────── ↑ 2 not pushed ╮╭ changes ─────────────────────────╮
+│▌↑ Remove personal/bank from s…       just now││ 3adf352 · andrew · just now      │
+│ ↑ Rename work/a to work/b.      5 minutes ago││ ↑ not pushed yet                 │
+│   Add given password for x.        3 days ago││                                  │
+│   Undo: Remove old/key from s…     1 week ago││ − /personal/bank                 │
+╰───────────────────────────────────────── 1/4 ╯╰──────────────────────────────────╯
+j k move  u undo this change  ⏎ roll back to here  esc back
+```
+
+- `u` on a commit undoes just that change, as a new `Undo: …` commit. The new
+  commit lands at the top of the list, so `u` again redoes it.
+- `⏎` rolls the whole store back to how it was at that commit — every newer
+  change undone together, as one new commit — after asking.
+- Nothing is rewritten: undo only adds commits, so it works after a push, and
+  rolling back can itself be undone. If later changes conflict with an undo,
+  or the store has uncommitted changes, nothing is touched.
+- `esc` goes back to the tree, on an entry the undo brought back.
+
+ezer-pass's own file-index commits are hidden from the list. History needs the
+store in git (`:git init`).
 
 ## File entries
 

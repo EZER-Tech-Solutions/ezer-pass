@@ -86,8 +86,10 @@ impl Completer for EzerHelper {
             return self.filename.complete(line, pos, ctx);
         }
 
-        let dirs_only =
-            cmd == "cd" || cmd == "mkdir" || (arg_index == 1 && !COMMANDS.contains(&cmd));
+        let dirs_only = cmd == "cd"
+            || cmd == "mkdir"
+            || cmd == "reindex"
+            || (arg_index == 1 && !COMMANDS.contains(&cmd));
         Ok((word_start, self.complete_store_path(word, dirs_only)))
     }
 }

@@ -5,8 +5,8 @@ use std::path::Path;
 
 /// Every command `run` understands, for completion and the TUI's command line.
 pub const COMMANDS: &[&str] = &[
-    "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "generate", "edit", "rm",
-    "mv", "cp", "find", "grep", "git", "help", "exit", "quit",
+    "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "reindex", "generate",
+    "edit", "rm", "mv", "cp", "find", "grep", "git", "help", "exit", "quit",
 ];
 
 pub struct Session {
@@ -174,6 +174,10 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             cmd_show(sess, positional[0], clip)?
         }
         "insert" => cmd_insert(sess, &flags, &positional)?,
+        "reindex" => {
+            expect_args(&positional, "reindex [path]", 0, 1)?;
+            cmd_reindex(sess, positional.first().copied())?
+        }
         "import" => {
             expect_args(&positional, "import [--force] <file> <entry>", 2, 2)?;
             let force = flags.iter().any(|f| *f == "-f" || *f == "--force");
@@ -350,6 +354,95 @@ fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
     Ok(())
 }
 
+/// Decrypt every entry (in `arg`, or the whole store) to find the file
+/// entries, and bring the file index in line. For stores whose files were
+/// imported before the index existed, or with plain `pass` elsewhere.
+/// Nothing decrypted is printed.
+fn cmd_reindex(sess: &mut Session, arg: Option<&str>) -> Result<()> {
+    let dir = arg.map(|a| sess.resolve(a)).unwrap_or_default();
+    if !dir.is_empty() && !sess.store.is_dir(&dir) && !sess.store.is_entry(&dir) {
+        bail!("{} is not in the password store", store::display(&dir));
+    }
+    let entries: Vec<String> = sess
+        .store
+        .walk()
+        .into_iter()
+        .filter(|(p, is_dir)| {
+            !is_dir
+                && (dir.is_empty()
+                    || *p == dir
+                    || p.strip_prefix(&dir).is_some_and(|r| r.starts_with('/')))
+        })
+        .map(|(p, _)| p)
+        .collect();
+    let total = entries.len();
+    let (mut files, mut found, mut dropped) = (0, 0, 0);
+    let mut failed = Vec::new();
+    // Ask for a passphrase at most once: after a cancelled prompt, entries
+    // gpg-agent can't decrypt on its own are skipped.
+    let mut may_prompt = true;
+    for (i, path) in entries.iter().enumerate() {
+        eprint!(
+            "\r\x1b[K{} {}/{total} {}",
+            "checking".dimmed(),
+            i + 1,
+            store::display(path)
+        );
+        let args = ["show", "--", path.as_str()];
+        let content = match pass::capture_no_prompt(&args) {
+            Ok(c) => Ok(c),
+            Err(e) if !may_prompt => Err(e),
+            Err(_) => {
+                eprint!("\r\x1b[K");
+                let result = pass::show(path);
+                may_prompt = result.is_ok();
+                result
+            }
+        };
+        let Ok(content) = content else {
+            failed.push(path.clone());
+            continue;
+        };
+        let size = match fileio::marker_filename(&content) {
+            Some(_) => match fileio::decode_payload(&content) {
+                Ok(entry) => Some(entry.data.len() as u64),
+                // A corrupt file entry is still a file; keep what's known.
+                Err(_) => {
+                    files += 1;
+                    continue;
+                }
+            },
+            None => None,
+        };
+        match (size.is_some(), sess.files.is_file(path)) {
+            (true, false) => found += 1,
+            (false, true) => dropped += 1,
+            _ => {}
+        }
+        if size.is_some() {
+            files += 1;
+        }
+        sess.files.learn(path, size);
+    }
+    eprint!("\r\x1b[K");
+    println!(
+        "checked {total} entr{}: {files} file entr{} ({found} newly found, {dropped} no longer files)",
+        if total == 1 { "y" } else { "ies" },
+        if files == 1 { "y" } else { "ies" },
+    );
+    if !failed.is_empty() {
+        let shown: Vec<String> = failed.iter().take(5).map(|p| store::display(p)).collect();
+        println!(
+            "{} {} couldn't be decrypted and kept their old status: {}{}",
+            "warning:".yellow().bold(),
+            failed.len(),
+            shown.join(", "),
+            if failed.len() > 5 { ", …" } else { "" }
+        );
+    }
+    Ok(())
+}
+
 /// Insert a new entry into the store.
 fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result<()> {
     // `insert --file <os-file> <entry>` is an alias for `import`.
@@ -483,6 +576,10 @@ fn print_help() {
     entry(
         "export [-f] <entry> [dest]",
         "write a file entry back out to disk",
+    );
+    entry(
+        "reindex [path]",
+        "find file entries made before ezer-pass tracked them",
     );
     println!();
     section("version control (pass git)");

@@ -125,7 +125,10 @@ pub enum Mode {
     },
     Confirm(Confirm),
     View(View),
-    Help,
+    /// The `?` popup, on its keys page or its `:` commands page.
+    Help {
+        commands: bool,
+    },
     /// A background `git pull`/`push` and its progress popup.
     Sync(Sync),
     /// The store's git history (`u`).
@@ -545,8 +548,18 @@ impl App {
             Mode::Rename { .. } => self.rename_key(key),
             Mode::Confirm(_) => self.confirm_key(key),
             Mode::View(_) => self.view_key(key),
-            Mode::Help => {
-                self.mode = Mode::Browse;
+            Mode::Help { commands } => {
+                // Tab (or ← →) flips between the pages; anything else closes.
+                self.mode = match key.code {
+                    KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Char('h' | 'l') => Mode::Help {
+                        commands: !commands,
+                    },
+                    _ => Mode::Browse,
+                };
                 Effect::None
             }
             Mode::Sync(_) => self.sync_key(key),
@@ -906,7 +919,7 @@ impl App {
                 self.refresh_git();
                 self.info("refreshed");
             }
-            KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('?') => self.mode = Mode::Help { commands: false },
             KeyCode::Char('u') => self.open_history(),
             _ => {}
         }
@@ -1275,7 +1288,7 @@ impl App {
         let store = &self.sess.store;
         match cmd {
             "exit" | "quit" => self.request_quit(),
-            "help" | "?" => self.mode = Mode::Help,
+            "help" | "?" => self.mode = Mode::Help { commands: true },
             "pwd" => self.info(store::display(&self.sess.cwd)),
             "cd" | "ls" | "list" if positional.len() <= 1 => {
                 let path = self

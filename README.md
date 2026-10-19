@@ -44,12 +44,14 @@ Run `ezer-pass` with no arguments:
 │                                 ││ marks   ▌1 marked   x cut y copy d …   │
 │                                 ││ git     origin/master  ↑2 to push      │
 ╰─────────────────────────────────╯╰────────────────────────────────────────╯
-⏎ copy/open  v view  space mark  x y p cut/copy/paste  r rename  / filter  ? help
+[⏎] copy  [v] view  [e] edit  [r] rename  [d] delete  [␣] mark  [/] filter  [?] help
 ```
 
 The top pane is a collapsible tree of the store. The bottom pane shows your
 recently used entries (with a countdown while one is on the clipboard), details
-of the highlighted row, the cut/copy buffer, marks, and git sync state.
+of the highlighted row, the cut/copy buffer, marks, and git sync state. The
+footer shows only the keys that do something right now: they change with the
+highlighted row (password, file, folder), and while items are marked or cut.
 
 | Key | Action |
 |---|---|
@@ -70,7 +72,7 @@ of the highlighted row, the cut/copy buffer, marks, and git sync state.
 | `g` `i` `m` `I` `E` | generate, insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | run any explore-mode command (`:git log`, `:find bank`, ...) |
 | `Esc` | clear the filter, then marks, then the buffer |
-| `R` / `?` / `q` | refresh / help / quit |
+| `R` / `?` / `q` | refresh / help (`Tab` flips between keys and `:` commands) / quit |
 
 - Pasting moves with `pass mv` / copies with `pass cp`, so entries are
   re-encrypted when they land under a different `.gpg-id` and every change is
@@ -130,6 +132,7 @@ hunter2
 | `find <terms>` / `grep <pattern>` | search names / decrypted contents |
 | `import [--force] <file> <entry>` | store a file as a base64 entry |
 | `export [-f] <entry> [dest]` | write a file entry back to disk |
+| `reindex [path]` | find file entries the index doesn't know about (older stores) |
 | `git <git-args>` | run git in the store (`git log`, `git remote add`, ...) |
 
 Every command also works one-shot from your shell with the same syntax:
@@ -176,7 +179,7 @@ how it branched and merged across machines:
 ╭ changes ──────────────────────────────────────── 3adf352 · andrew · just now ╮
 │ − /personal/bank                                                             │
 ╰──────────────────────────────────────────────────────────── ↑ not pushed yet ╯
-j k move  u undo this change  ⏎ roll back to here  esc back
+[j k] move  [u] undo this change  [⏎] roll back to here  [esc] back
 ```
 
 - `u` on a commit undoes just that change, as a new `Undo: …` commit. The new
@@ -222,6 +225,12 @@ files in their own color without a single decrypt. ezer-pass updates it on
 decrypted, so changes made with plain `pass` heal the next time you view the
 entry. It reveals only *that* an entry is a file; the names are already
 unencrypted.
+
+For an older store — files imported before the index existed, or with plain
+`pass` on another machine — run `reindex` (`:reindex` in the TUI, or
+`ezer-pass reindex`) once. It decrypts every entry (or just those under
+`reindex <folder>`) without printing anything, records which are files, and
+commits the updated index. You're asked for your passphrase at most once.
 
 In the TUI, file entries are magenta with a `▪`; the info pane shows their size,
 and `Enter` (or `E`) opens `:export <entry> ` — add a destination, or press

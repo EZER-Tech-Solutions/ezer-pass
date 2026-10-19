@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if matches!(
         app.mode,
-        Mode::Confirm(_) | Mode::View(_) | Mode::Help | Mode::Sync(_)
+        Mode::Confirm(_) | Mode::View(_) | Mode::Help { .. } | Mode::Sync(_)
     ) {
         // Push everything behind a popup into the background.
         let area = f.area();
@@ -61,7 +61,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Confirm(confirm) => draw_confirm(f, confirm, app.upstream.as_deref()),
         Mode::View(_) => draw_view(f, app),
-        Mode::Help => draw_help(f),
+        Mode::Help { commands } => draw_help(f, *commands),
         Mode::Sync(sync) => draw_sync(f, sync, app.upstream.as_deref()),
         _ => {}
     }
@@ -139,7 +139,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
-            " ezer-pass ".fg(Color::Green).bg(SHADE).bold(),
+            " ezer-pass ".fg(Color::LightMagenta).bg(SHADE).bold(),
             " ".into(),
         ]))
         .title_top(Line::from(format!(" {root} ").dim()).right_aligned())
@@ -578,23 +578,90 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             spans.extend(hint(&[("esc", "clear"), ("/", "edit")]).spans);
             Line::from(spans)
         }
-        None => hint_fit(
-            &[
-                ("⏎", "copy/open"),
-                ("v", "view"),
-                ("space", "mark"),
-                ("x y p", "cut/copy/paste"),
-                ("r", "rename"),
-                ("u", "undo"),
-                ("/", "filter"),
-                ("1-5", "recent"),
-                (":", "command"),
-                ("?", "help"),
-            ],
-            area.width as usize,
-        ),
+        None => browse_hints(app, area.width as usize),
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// The footer while browsing: only keys that do something right now, most
+/// useful first (`hint_fit` drops from the end), help always last.
+fn browse_hints(app: &App, width: usize) -> Line<'static> {
+    let mut prefix: Vec<Span> = Vec::new();
+    let mut keys: Vec<(&str, &str)> = if !app.marks.is_empty() {
+        prefix.push(format!("{} marked  ", app.marks.len()).fg(MARK).bold());
+        vec![
+            ("x", "cut"),
+            ("y", "copy"),
+            ("d", "delete"),
+            ("␣", "mark more"),
+            ("esc", "unmark"),
+        ]
+    } else if let Some(b) = &app.buffer {
+        let n = b.paths.len();
+        prefix.push(
+            if b.cut {
+                format!("✂ {n} cut  ")
+            } else {
+                format!("+ {n} copied  ")
+            }
+            .fg(MARK)
+            .bold(),
+        );
+        vec![("p", "paste here"), ("esc", "cancel")]
+    } else {
+        match app.selected() {
+            Some(row) if row.is_dir => vec![
+                (
+                    "⏎",
+                    if app.is_expanded(&row.path) {
+                        "close"
+                    } else {
+                        "open"
+                    },
+                ),
+                ("g", "generate"),
+                ("i", "insert"),
+                ("m", "new folder"),
+                ("I", "import file"),
+                ("␣", "mark"),
+                ("r", "rename"),
+                ("/", "filter"),
+                ("u", "history"),
+            ],
+            Some(row) if app.sess.files.is_file(&row.path) => vec![
+                ("⏎", "export"),
+                ("v", "view"),
+                ("r", "rename"),
+                ("d", "delete"),
+                ("␣", "mark"),
+                ("/", "filter"),
+                ("u", "history"),
+                (":", "command"),
+            ],
+            Some(_) => vec![
+                ("⏎", "copy"),
+                ("v", "view"),
+                ("e", "edit"),
+                ("r", "rename"),
+                ("d", "delete"),
+                ("␣", "mark"),
+                ("/", "filter"),
+                ("u", "history"),
+                (":", "command"),
+            ],
+            None => vec![
+                ("i", "insert"),
+                ("g", "generate"),
+                ("I", "import file"),
+                (":", "command"),
+            ],
+        }
+    };
+    keys.push(("?", "help"));
+    let used: usize = prefix.iter().map(|s| s.width()).sum();
+    let mut line = hint_fit(&keys, width.saturating_sub(used));
+    prefix.append(&mut line.spans);
+    Line::from(prefix)
 }
 
 fn hint(keys: &[(&str, &str)]) -> Line<'static> {
@@ -871,7 +938,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
-            " history ".fg(Color::Green).bg(SHADE).bold(),
+            " history ".fg(Color::LightMagenta).bg(SHADE).bold(),
             " ".into(),
         ]))
         .border_style(Style::new().fg(BORDER));
@@ -1060,7 +1127,10 @@ fn confirm_box(f: &mut Frame, title: &str, question: &str, default_yes: bool) {
     );
 }
 
-fn draw_help(f: &mut Frame) {
+fn draw_help(f: &mut Frame, commands: bool) {
+    if commands {
+        return draw_commands_help(f);
+    }
     let groups: &[(&str, &[(&str, &str)])] = &[
         (
             "move",
@@ -1088,7 +1158,7 @@ fn draw_help(f: &mut Frame) {
         (
             "organize",
             &[
-                ("space", "mark / unmark"),
+                ("␣ space", "mark / unmark"),
                 ("x  y", "cut / copy marked or highlighted"),
                 ("p", "paste into highlighted folder"),
                 ("r", "rename in place"),
@@ -1135,9 +1205,7 @@ fn draw_help(f: &mut Frame) {
     const COL: u16 = 46;
     let screen = f.area();
     let two = screen.width >= 2 * COL + 6;
-    let block = popup(Line::from(" keys ").bold(), ACCENT)
-        .title_bottom(Line::from(" any key closes ".dim()).right_aligned())
-        .padding(Padding::new(2, 2, 1, 1));
+    let block = help_block(false);
     if two {
         let left = column(&groups[..2]);
         let right = column(&groups[2..]);
@@ -1157,6 +1225,106 @@ fn draw_help(f: &mut Frame) {
         f.render_widget(Clear, area);
         f.render_widget(Paragraph::new(lines).block(block), area);
     }
+}
+
+/// The `?` popup's frame: the two pages as tabs in the title.
+fn help_block(commands: bool) -> Block<'static> {
+    let tab = |name: &'static str, active: bool| -> Span<'static> {
+        if active {
+            format!(" {name} ").fg(ACCENT).bg(SHADE).bold()
+        } else {
+            format!(" {name} ").dim()
+        }
+    };
+    let mut keys = hint(&[
+        ("tab", if commands { "keys" } else { "commands" }),
+        ("esc", "close"),
+    ]);
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    popup(
+        Line::from(vec![
+            " ".into(),
+            tab("keys", !commands),
+            " ".into(),
+            tab("commands", commands),
+            " ".into(),
+        ]),
+        ACCENT,
+    )
+    .title_bottom(keys.right_aligned())
+    .padding(Padding::new(2, 2, 1, 1))
+}
+
+/// The commands page: everything `:` takes, grouped like `help` in the REPL.
+fn draw_commands_help(f: &mut Frame) {
+    let groups: &[(&str, &[(&str, &str)])] = &[
+        (
+            "navigate",
+            &[
+                ("cd | ls [path]", "go to a folder in the tree"),
+                ("mkdir <path>", "create a folder"),
+                ("pwd", "show the current folder"),
+            ],
+        ),
+        (
+            "entries",
+            &[
+                ("show [-c] <entry>", "view an entry, or -c to copy it"),
+                ("insert [-m] [-e] <entry>", "add an entry"),
+                ("generate [-n] <entry> [len]", "generate a password"),
+                ("edit <entry>", "edit in $EDITOR"),
+                ("mv <src> <dest>", "rename or move"),
+                ("cp <src> <dest>", "copy"),
+                ("rm [-r] <path>", "delete an entry or folder"),
+            ],
+        ),
+        (
+            "files",
+            &[
+                (
+                    "import [--force] <file> <entry>",
+                    "store a file as an entry",
+                ),
+                ("export [-f] <entry> [dest]", "write a file entry to disk"),
+                ("reindex [path]", "find file entries made before ezer-pass"),
+            ],
+        ),
+        (
+            "search & git",
+            &[
+                ("find <terms>", "search entry names"),
+                ("grep <pattern>", "search inside decrypted entries"),
+                ("git <git-args>", "run git in the store"),
+            ],
+        ),
+        (
+            "session",
+            &[("help", "this page"), ("quit", "leave (offers to push)")],
+        ),
+    ];
+    const USAGE: usize = 33;
+    let mut lines: Vec<Line> = Vec::new();
+    for (name, rows) in groups {
+        lines.push(Line::from(name.to_uppercase()).fg(DIR).bold());
+        for (usage, desc) in rows.iter() {
+            lines.push(Line::from(vec![
+                ":".fg(ACCENT).bold(),
+                format!("{usage:<USAGE$}").fg(ACCENT),
+                desc.to_string().into(),
+            ]));
+        }
+        lines.push("".into());
+    }
+    lines.push(
+        "paths are relative to the highlighted folder; /abs and ../ work"
+            .dim()
+            .into(),
+    );
+    let width = (1 + USAGE + 42 + 6) as u16;
+    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(help_block(true)), area);
 }
 
 /// The store root for the tree's title: `~` for $HOME, and cut from the

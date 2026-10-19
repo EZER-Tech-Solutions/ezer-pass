@@ -11,17 +11,24 @@ use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
-const ACCENT: Color = Color::Green;
-const DIR: Color = Color::Blue;
-const MARK: Color = Color::Yellow;
+// Picked by eye on a dark theme. 0-15 follow the terminal's theme;
+// indexed colors above that are fixed.
+const ACCENT: Color = Color::Indexed(214);
+const DIR: Color = Color::Cyan;
+const MARK: Color = Color::LightMagenta;
 /// File entries (base64-stored files), told apart via the file index.
 const FILE: Color = Color::Magenta;
 const DANGER: Color = Color::Red;
 const MASK: &str = "••••••••••••";
 /// Width of the highlight bar the list draws before every row.
 const BAR: &str = "▌";
+/// The dark grey behind the title chips and the highlighted row.
+const SHADE: Color = Color::Indexed(236);
+/// Pane borders.
+const BORDER: Color = Color::Indexed(242);
 /// Width of the label column in the info pane.
 const LABEL: usize = 8;
 
@@ -64,7 +71,7 @@ fn pane(title: &str) -> Block<'_> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(format!(" {title} ")).bold())
-        .border_style(Style::new().dim())
+        .border_style(Style::new().fg(BORDER))
 }
 
 fn popup(title: Line<'static>, color: Color) -> Block<'static> {
@@ -94,6 +101,19 @@ fn path_spans(path: &str, style: Style) -> Vec<Span<'static>> {
     ]
 }
 
+/// A folder's icon, with the space after it: Nerd Font folder glyphs, or
+/// triangles with `EZER_PASS_ICONS=plain` for fonts without them.
+fn folder_icon(open: bool) -> &'static str {
+    static PLAIN: OnceLock<bool> = OnceLock::new();
+    let plain = *PLAIN.get_or_init(|| std::env::var("EZER_PASS_ICONS").is_ok_and(|v| v == "plain"));
+    match (plain, open) {
+        (false, true) => "\u{f07c} ",
+        (false, false) => "\u{f07b} ",
+        (true, true) => "▼ ",
+        (true, false) => "▶ ",
+    }
+}
+
 /// Tree guides for each row: `│ ` under ancestors with siblings further
 /// down, then `├─`/`└─` joining the row to its parent. Two columns per level
 /// below the top, which the rename cursor relies on.
@@ -119,11 +139,11 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
-            " ezer-pass ".fg(Color::Black).bg(ACCENT).bold(),
+            " ezer-pass ".fg(Color::Green).bg(SHADE).bold(),
             " ".into(),
         ]))
         .title_top(Line::from(format!(" {root} ").dim()).right_aligned())
-        .border_style(Style::new().dim());
+        .border_style(Style::new().fg(BORDER));
     if app.filtering() {
         let matches = app.rows.iter().filter(|r| !r.context_only).count();
         block = block.title_bottom(
@@ -201,8 +221,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
             let is_file = !row.is_dir && app.sess.files.is_file(&row.path);
             // Every icon is two columns wide; the rename cursor relies on it.
             let icon = match (row.is_dir, app.is_expanded(&row.path)) {
-                (true, true) => "▾ ".fg(DIR),
-                (true, false) => "▸ ".fg(DIR),
+                (true, open) => folder_icon(open).fg(DIR),
                 (false, _) if is_file => "▪ ".fg(FILE),
                 (false, _) => "• ".dim(),
             };
@@ -223,7 +242,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                         name = name.dim();
                     }
                     if selected == Some(i) {
-                        name = name.reversed().bold();
+                        name = name.bold();
                     }
                     spans.push(name);
                 }
@@ -231,7 +250,10 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
             ListItem::new(Line::from(spans))
         })
         .collect();
-    let list = List::new(items).block(block).scroll_padding(2);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::new().bg(SHADE))
+        .scroll_padding(2);
     f.render_stateful_widget(list, area, &mut app.list);
 
     if app.rows.len() > app.page {
@@ -307,9 +329,7 @@ fn draw_recent(f: &mut Frame, area: Rect, app: &App) {
         lines.push(" entries you copy or view land here".dim().into());
         lines.push(Line::from(vec![
             "  ".into(),
-            "1".fg(ACCENT).bold(),
-            "-".dim(),
-            "5".fg(ACCENT).bold(),
+            "[1-5]".fg(ACCENT).bold(),
             " use them again".dim(),
         ]));
     }
@@ -378,7 +398,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
             }
             if size.is_some() {
                 detail.push("   ".into());
-                detail.push("⏎".fg(ACCENT).bold());
+                detail.push("[⏎]".fg(ACCENT).bold());
                 detail.push(" export".dim());
             }
             lines.push(Line::from(detail));
@@ -398,7 +418,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
                     if b.cut { "✂ cut " } else { "+ copied " }.fg(MARK).bold(),
                     names.join(", ").into(),
                     "   ".into(),
-                    "p".fg(ACCENT).bold(),
+                    "[p]".fg(ACCENT).bold(),
                     " paste".dim(),
                 ]
             }
@@ -414,11 +434,11 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
             vec![
                 format!("{BAR}{} marked", app.marks.len()).fg(MARK).bold(),
                 "   ".into(),
-                "x".fg(ACCENT).bold(),
+                "[x]".fg(ACCENT).bold(),
                 " cut ".dim(),
-                "y".fg(ACCENT).bold(),
+                "[y]".fg(ACCENT).bold(),
                 " copy ".dim(),
-                "d".fg(ACCENT).bold(),
+                "[d]".fg(ACCENT).bold(),
                 " delete".dim(),
             ]
         },
@@ -583,7 +603,7 @@ fn hint(keys: &[(&str, &str)]) -> Line<'static> {
         if i > 0 {
             spans.push("  ".into());
         }
-        spans.push(k.to_string().fg(ACCENT).bold());
+        spans.push(format!("[{k}]").fg(ACCENT).bold());
         spans.push(format!(" {desc}").dim());
     }
     Line::from(spans)
@@ -730,24 +750,69 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
     confirm_box(f, title, &question, default_yes);
 }
 
-/// The history view: commits on the left, what the highlighted one
-/// changed on the right.
+/// Colors for the graph's lanes, by column, like `git log --graph`.
+const LANES: [Color; 6] = [
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Yellow,
+    Color::Green,
+    Color::Red,
+];
+
+/// git's ASCII graph redrawn with box-drawing lines, each lane in its own
+/// color, padded to `width` columns.
+fn graph_spans(graph: &str, width: usize) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span> = graph
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| {
+            let lane = LANES[(i / 2) % LANES.len()];
+            match ch {
+                '*' => "●".fg(lane).bold(),
+                '|' => "│".fg(lane),
+                '/' => "╱".fg(lane),
+                '\\' => "╲".fg(lane),
+                '_' | '-' => "─".fg(lane),
+                '.' => "┄".fg(lane),
+                c => Span::raw(c.to_string()),
+            }
+        })
+        .collect();
+    let used = graph.chars().count();
+    if used < width {
+        spans.push(" ".repeat(width - used).into());
+    }
+    spans
+}
+
+/// The history view, laid out like the main one: the commits (with their
+/// graph) on top, what the highlighted one changed below.
 fn draw_history(f: &mut Frame, app: &mut App) {
-    let [main, footer] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(main);
-    app.page = left.height.saturating_sub(2) as usize;
+    let [top, bottom, footer] = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(7),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
+    app.page = top.height.saturating_sub(2) as usize;
     let has_upstream = app.upstream.is_some();
     let files = &app.sess.files;
     let Mode::History(h) = &mut app.mode else {
         return;
     };
 
-    // Commits.
-    let width = left.width.saturating_sub(2) as usize;
+    // Commits. Graph, subject and time each get a column, so they line up.
+    let width = top.width.saturating_sub(2) as usize;
     let selected = h.list.selected();
-    // Times right-aligned in one column, so subjects line up.
+    let graph_width = h
+        .commits
+        .iter()
+        .flat_map(|c| std::iter::once(&c.graph).chain(&c.after))
+        .map(|g| g.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
     let when_width = h
         .commits
         .iter()
@@ -770,35 +835,46 @@ fn draw_history(f: &mut Frame, app: &mut App) {
                 "  ".into()
             };
             let when = format!("{:>when_width$}", ago(commit_time(c.time)));
-            let room = width.saturating_sub(1 + 2 + when_width + 2);
+            let short = format!("{} ", c.short);
+            let room = width.saturating_sub(1 + graph_width + 2 + short.len() + when_width + 2);
             let subject = truncate(&c.subject, room);
             let gap = room.saturating_sub(subject.chars().count()) + 2;
-            let mut subject = match ["Undo: ", "Redo: ", "Roll back "]
+            let mut subject = if ["Undo: ", "Redo: ", "Roll back "]
                 .iter()
                 .any(|p| c.subject.starts_with(p))
             {
-                true => subject.fg(Color::Cyan),
-                false => subject.into(),
+                subject.fg(Color::Cyan)
+            } else {
+                subject.into()
             };
             if selected == Some(i) {
-                subject = subject.reversed().bold();
+                subject = subject.bold();
             }
-            ListItem::new(Line::from(vec![
-                bar,
+            let mut first = vec![bar];
+            first.extend(graph_spans(&c.graph, graph_width));
+            first.extend([
                 flag,
+                short.dim(),
                 subject,
                 " ".repeat(gap).into(),
                 when.dim(),
-            ]))
+            ]);
+            let mut lines = vec![Line::from(first)];
+            for g in &c.after {
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(graph_spans(g, graph_width));
+                lines.push(Line::from(spans));
+            }
+            ListItem::new(lines)
         })
         .collect();
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
-            " history ".fg(Color::Black).bg(ACCENT).bold(),
+            " history ".fg(Color::Green).bg(SHADE).bold(),
             " ".into(),
         ]))
-        .border_style(Style::new().dim());
+        .border_style(Style::new().fg(BORDER));
     if !h.unpushed.is_empty() {
         block = block.title_top(
             Line::from(format!(" ↑ {} not pushed ", h.unpushed.len()).fg(MARK)).right_aligned(),
@@ -810,33 +886,49 @@ fn draw_history(f: &mut Frame, app: &mut App) {
         );
     }
     f.render_stateful_widget(
-        List::new(items).block(block).scroll_padding(2),
-        left,
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::new().bg(SHADE))
+            .scroll_padding(2),
+        top,
         &mut h.list,
     );
 
-    // What the highlighted commit changed.
+    // What the highlighted commit changed; who and when go on the border.
+    let mut block = pane("changes").padding(Padding::horizontal(1));
     let mut lines: Vec<Line> = Vec::new();
     if let Some(c) = h.selected() {
-        lines.push(Line::from(vec![
-            c.short.clone().fg(MARK),
-            format!(" · {} · {}", c.author, ago(commit_time(c.time))).dim(),
-        ]));
+        block = block.title_top(
+            Line::from(vec![
+                " ".into(),
+                c.short.clone().fg(MARK),
+                format!(" · {} · {} ", c.author, ago(commit_time(c.time))).dim(),
+            ])
+            .right_aligned(),
+        );
         if has_upstream {
-            lines.push(if h.unpushed.contains(&c.hash) {
-                "↑ not pushed yet".fg(MARK).into()
-            } else {
-                "✓ pushed".dim().into()
-            });
+            block = block.title_bottom(
+                if h.unpushed.contains(&c.hash) {
+                    Line::from(" ↑ not pushed yet ".fg(MARK))
+                } else {
+                    Line::from(" ✓ pushed ".dim())
+                }
+                .right_aligned(),
+            );
         }
         if c.parents > 1 {
-            lines.push("merge".fg(DIR).into());
+            lines.push("merge — against its first parent:".fg(DIR).into());
         }
-        lines.push("".into());
         if h.changes.is_empty() {
             lines.push("no file changes".dim().into());
         }
-        for change in &h.changes {
+        let rows = bottom.height.saturating_sub(2) as usize;
+        let shown = if h.changes.len() + lines.len() > rows {
+            rows.saturating_sub(lines.len() + 1)
+        } else {
+            h.changes.len()
+        };
+        for change in &h.changes[..shown] {
             let (sign, color) = match change.status {
                 'A' | 'C' => ("+ ", ACCENT),
                 'D' => ("− ", DANGER),
@@ -864,11 +956,15 @@ fn draw_history(f: &mut Frame, app: &mut App) {
             }
             lines.push(Line::from(spans));
         }
+        if shown < h.changes.len() {
+            lines.push(
+                format!("… and {} more", h.changes.len() - shown)
+                    .dim()
+                    .into(),
+            );
+        }
     }
-    f.render_widget(
-        Paragraph::new(lines).block(pane("changes").padding(Padding::horizontal(1))),
-        right,
-    );
+    f.render_widget(Paragraph::new(lines).block(block), bottom);
 
     // Footer.
     let line = match &app.status {
@@ -922,13 +1018,12 @@ fn truncate(s: &str, max: usize) -> String {
 /// A yes/no question in a popup, colored by its default answer.
 fn confirm_box(f: &mut Frame, title: &str, question: &str, default_yes: bool) {
     let color = if default_yes { ACCENT } else { DANGER };
-    // The default answer is a filled button; the other is plain.
+    // The default answer is bracketed in its color; the other is dim.
     let button = |key: &str, label: &str, default: bool| -> Vec<Span<'static>> {
-        let text = format!(" {key} {label} ");
         if default {
-            vec![text.fg(Color::Black).bg(color).bold()]
+            vec![format!("[ {key} {label} ]").fg(color).bold()]
         } else {
-            vec![text.dim()]
+            vec![format!("  {key} {label}  ").dim()]
         }
     };
     let mut buttons = button("y", "yes", default_yes);
@@ -1149,7 +1244,7 @@ mod tests {
     fn hints_drop_from_the_end_but_keep_help() {
         let keys = [("a", "one"), ("b", "two"), ("?", "help")];
         assert_eq!(hint_fit(&keys, 100).width(), hint(&keys).width());
-        let narrow = hint_fit(&keys, 14);
+        let narrow = hint_fit(&keys, 20);
         assert_eq!(narrow.width(), hint(&[("a", "one"), ("?", "help")]).width());
     }
 }

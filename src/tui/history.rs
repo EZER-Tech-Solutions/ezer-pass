@@ -45,10 +45,18 @@ impl History {
 
     /// Re-read the log, highlighting the newest commit.
     pub fn reload(&mut self, root: &Path) -> Result<()> {
-        self.commits = pass::git_log(root, LIMIT)?
-            .into_iter()
-            .filter(|c| c.subject != INDEX_SUBJECT)
-            .collect();
+        self.commits.clear();
+        for commit in pass::git_log(root, LIMIT)? {
+            // Dropping a row leaves the graph's lanes lined up above and
+            // below it; only its connector lines need keeping.
+            if commit.subject == INDEX_SUBJECT {
+                if let Some(prev) = self.commits.last_mut() {
+                    prev.after.extend(commit.after);
+                }
+                continue;
+            }
+            self.commits.push(commit);
+        }
         self.unpushed = pass::git_unpushed(root);
         self.select(0, root);
         Ok(())

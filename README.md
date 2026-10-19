@@ -31,11 +31,11 @@ Run `ezer-pass` with no arguments:
 
 ```
 ╭ ezer-pass  ──────────────────────────────────────────── ~/.password-store ╮
-│   ▾ servers/                                                              │
-│▌  ├─▸ prod/                                                               │
+│   ▼ servers/                                                              │
+│▌  ├─▶ prod/                                                               │
 │▌✂ ├─• web1                                                                │
 │   └─▪ tls-cert                                                            │
-│   ▸ personal/                                                             │
+│   ▶ personal/                                                             │
 ╰────────────────────────────────────────────────────────────────────── 3/5 ╯
 ╭ recent ─────────────────────────╮╭ info ──────────────────────────────────╮
 │ 1 /servers/web1       ▰▰▰▱▱ 32s ││ /servers/web1                          │
@@ -160,15 +160,22 @@ commands never touch git.
 ## History and undo
 
 Every change pass makes is a git commit, so `u` in the TUI opens the store's
-history — from any session or machine, not just this one:
+history — from any session or machine, not just this one — with a graph of
+how it branched and merged across machines:
 
 ```
-╭ history ───────────────────── ↑ 2 not pushed ╮╭ changes ─────────────────────────╮
-│▌↑ Remove personal/bank from s…       just now││ 3adf352 · andrew · just now      │
-│ ↑ Rename work/a to work/b.      5 minutes ago││ ↑ not pushed yet                 │
-│   Add given password for x.        3 days ago││                                  │
-│   Undo: Remove old/key from s…     1 week ago││ − /personal/bank                 │
-╰───────────────────────────────────────── 1/4 ╯╰──────────────────────────────────╯
+╭ history ───────────────────────────────────────────────────── ↑ 1 not pushed ╮
+│▌●   ↑ 3adf352 Remove personal/bank from store.                       just now│
+│ ●     65660df Merge branch 'master' of github.com:me/pass         2 hours ago│
+│ │╲                                                                           │
+│ │ ●   b6b82d5 Add given password for laptop/key to store.         2 hours ago│
+│ ● │   4001965 Rename work/a to work/b.                             3 days ago│
+│ │╱                                                                           │
+│ ●     8be2f54 Undo: Remove old/key from store.                     1 week ago│
+╰───────────────────────────────────────────────────────────────────────── 1/5 ╯
+╭ changes ──────────────────────────────────────── 3adf352 · andrew · just now ╮
+│ − /personal/bank                                                             │
+╰──────────────────────────────────────────────────────────── ↑ not pushed yet ╯
 j k move  u undo this change  ⏎ roll back to here  esc back
 ```
 
@@ -229,6 +236,7 @@ refused without `--force` — a password store is a poor home for large blobs.
 | `PASSWORD_STORE_DIR` | store location (default `~/.password-store`), same as pass |
 | `PASSWORD_STORE_CLIP_TIME` | seconds before a revealed password re-masks in the TUI (default 45) and the recent-pane countdown, same as pass's clipboard timeout |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |
+| `EZER_PASS_ICONS` | `plain` draws folders as `▶`/`▼` instead of Nerd Font folder icons, for fonts without them |
 
 ## Development
 

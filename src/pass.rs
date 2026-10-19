@@ -142,35 +142,46 @@ pub struct Commit {
     pub author: String,
     pub parents: usize,
     pub subject: String,
+    /// `git log --graph`'s drawing on the commit's own line ("| * "), and
+    /// the connector-only lines ("|/") that follow it.
+    pub graph: String,
+    pub after: Vec<String>,
 }
 
-/// The newest `limit` commits of the store, newest first.
+/// The newest `limit` commits of the store, newest first, with git's
+/// graph drawing.
 pub fn git_log(store_root: &Path, limit: usize) -> Result<Vec<Commit>> {
     let out = git_quiet(
         store_root,
         &[
             "log",
+            "--graph",
             &format!("-n{limit}"),
-            "--format=%H%x1f%h%x1f%ct%x1f%an%x1f%P%x1f%s",
+            "--format=%x1f%H%x1f%h%x1f%ct%x1f%an%x1f%P%x1f%s",
         ],
     )?;
-    Ok(out
-        .lines()
-        .filter_map(|line| {
-            let f: Vec<&str> = line.splitn(6, '\x1f').collect();
-            let [hash, short, time, author, parents, subject] = f[..] else {
-                return None;
-            };
-            Some(Commit {
-                hash: hash.into(),
-                short: short.into(),
-                time: time.parse().unwrap_or(0),
-                author: author.into(),
-                parents: parents.split_whitespace().count(),
-                subject: subject.into(),
-            })
-        })
-        .collect())
+    let mut commits: Vec<Commit> = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.splitn(7, '\x1f').collect();
+        let [graph, hash, short, time, author, parents, subject] = f[..] else {
+            // A connector-only line belongs under the commit above it.
+            if let Some(last) = commits.last_mut() {
+                last.after.push(line.trim_end().to_string());
+            }
+            continue;
+        };
+        commits.push(Commit {
+            hash: hash.into(),
+            short: short.into(),
+            time: time.parse().unwrap_or(0),
+            author: author.into(),
+            parents: parents.split_whitespace().count(),
+            subject: subject.into(),
+            graph: graph.trim_end().to_string(),
+            after: Vec::new(),
+        });
+    }
+    Ok(commits)
 }
 
 /// Commits not yet on the upstream; empty without one.

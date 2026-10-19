@@ -124,16 +124,17 @@ impl Hinter for EzerHelper {
 impl Validator for EzerHelper {}
 impl Helper for EzerHelper {}
 
-/// Return the path to the history file, creating the directory if necessary.
-/// NOTE: History never tracks passwords, only commands and store paths.
-fn history_path() -> Option<PathBuf> {
+/// Path of a file in ezer-pass's state directory (`$XDG_STATE_HOME/ezer-pass`),
+/// creating the directory if necessary. State files hold commands and store
+/// paths only, never secrets.
+pub fn state_file(name: &str) -> Option<PathBuf> {
     let state_dir = match std::env::var_os("XDG_STATE_HOME") {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
     };
     let dir = state_dir.join("ezer-pass");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("history"))
+    Some(dir.join(name))
 }
 
 /// Run the interactive REPL (Read-Eval-Print Loop) for the password manager.
@@ -154,7 +155,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
 
     // load or create the history file, if possible.
     // If the history file cannot be created, continue without history.
-    let history = history_path();
+    let history = state_file("history");
     if let Some(path) = &history {
         // Load the command history from the history file.
         let _ = rl.load_history(path);

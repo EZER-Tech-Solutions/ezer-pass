@@ -59,14 +59,14 @@ fn perform(
     let mut exit_warning = None;
     match effect {
         Effect::None => {}
-        Effect::Decrypt { path, reveal } => {
+        Effect::Decrypt(path) => {
             // Try without a passphrase prompt first: if gpg-agent has it
             // cached the screen never flickers.
             let result = match pass::capture_no_prompt(&["show", "--", &path]) {
                 Ok(content) => Ok(content),
                 Err(_) => suspended(terminal, || pause_on_err(pass::show(&path)))?,
             };
-            app.finish_decrypt(path, result, reveal);
+            app.finish_decrypt(path, result);
         }
         Effect::Copy(path) => {
             let args = ["show", "-c", "--", path.as_str()];
@@ -76,19 +76,25 @@ fn perform(
             };
             app.finish_copy(&path, result);
         }
-        Effect::Run { argv, pause } => {
-            let result = suspended(terminal, || {
-                println!("{} {}", ":".green().bold(), argv.join(" "));
-                let result = commands::run(&mut app.sess, &argv).map(|_| ());
-                if let Err(e) = &result {
-                    eprintln!("{} {e:#}", "error:".red().bold());
+        Effect::Run(batch) => {
+            let (done, result) = suspended(terminal, || {
+                let mut done = 0;
+                let mut result = Ok(());
+                for job in &batch.jobs {
+                    println!("{} {}", ":".green().bold(), job.argv.join(" "));
+                    if let Err(e) = commands::run(&mut app.sess, &job.argv) {
+                        eprintln!("{} {e:#}", "error:".red().bold());
+                        result = Err(e);
+                        break;
+                    }
+                    done += 1;
                 }
-                if matches!(pause, Pause::Always) || result.is_err() {
+                if matches!(batch.pause, Pause::Always) || result.is_err() {
                     wait_for_enter();
                 }
-                result
+                (done, result)
             })?;
-            app.finish_run(result);
+            app.finish_run(&batch, done, result);
         }
         Effect::Pull => {
             let result = suspended(terminal, || {

@@ -4,9 +4,9 @@ An interactive wrapper around [`pass`](https://www.passwordstore.org/), the stan
 unix password manager. It fixes the two things that make a deeply nested store
 painful: typing long entry paths, and storing anything that isn't text.
 
-- **TUI** — a full-screen browser: directory and preview panes, masked
-  passwords you reveal on demand, store-wide fuzzy search, and every command one
-  keystroke (or `:`) away.
+- **TUI** — a full-screen browser: a collapsible tree with fuzzy filtering,
+  cut/copy/paste and in-place rename, a recent-entries pane for one-key copies,
+  and every command one keystroke (or `:`) away.
 - **Explore mode** — a shell-like session that tracks a current directory inside
   your store: `cd servers`, `ls`, `show web1`, with tab completion and history.
 - **File entries** — import any file as a base64-encoded pass entry and export it
@@ -30,33 +30,55 @@ cargo install --path .
 Run `ezer-pass` with no arguments:
 
 ```
- ezer-pass  /servers                                          origin/master ↑1
-┌ entries ──────────────────┐┌ /servers/web1 ──────────────────────────────────┐
-│ prod/                     ││••••••••••••  space to reveal                    │
-│▌web1                      ││user: alice                                      │
-│                           ││url: https://example.com                         │
-└───────────────────────────┘└─────────────────────────────────────────────────┘
-jk move  hl dirs  ⏎ open  space reveal  c copy  / search  : command  ? help  q quit
+┌ ezer-pass  ──────────────────────────────────────────── ~/.password-store ┐
+│   ▾ servers/                                                              │
+│ ●   ▸ prod/                                                               │
+│▌✂     web1                                                                │
+│   ▸ personal/                                                             │
+└───────────────────────────────────────────────────────────────────────────┘
+┌ recent ─────────────────────────┐┌ info ──────────────────────────────────┐
+│ 1 /servers/web1  ⧉ 32s          ││/servers/web1                           │
+│ 2 /apple/id                     ││password · modified 3 days ago          │
+│                                 ││✂ cut web1  p paste                     │
+│                                 ││● 1 marked  x cut · y copy · d delete   │
+│                                 ││git origin/master ↑2 unpushed           │
+└─────────────────────────────────┘└────────────────────────────────────────┘
+⏎ copy/open  v view  space mark  x/y/p cut/copy/paste  r rename  / filter  ? help
 ```
+
+The top pane is a collapsible tree of the store. The bottom pane shows your
+recently used entries (with a countdown while one is on the clipboard), details
+of the highlighted row, the cut/copy buffer, marks, and git sync state.
 
 | Key | Action |
 |---|---|
 | `j` `k` / arrows | move (`PgUp` `PgDn` `Home` `End`) |
-| `l` / `→` / `Enter` | open a directory, or decrypt the selected entry |
-| `h` / `←` / `Backspace` | parent directory |
-| `space` | reveal / hide the password line |
-| `c` | copy the password (via `pass show -c`) |
-| `/` | fuzzy-search every entry and directory in the store |
+| `l` / `→`, `h` / `←` | expand / collapse a folder, step in / jump to parent |
+| `Enter` | copy the password (via `pass show -c`), export a file entry, or toggle a folder |
+| `H` / `Backspace` | collapse the folder the cursor is in, landing on it |
+| `-` | collapse everything |
+| `v` | view the entry in a popup; `space` reveals the password |
+| `c`, `1`-`5` | copy the highlighted entry, or a recent one |
+| `/` | fuzzy-filter the tree in place; `Esc` clears |
+| `space` | mark / unmark (moves down) |
+| `x` / `y` / `p` | cut / copy the marked (or highlighted) items, paste into the highlighted folder |
+| `r` | rename in place (`../x` and `/abs/path` move it) |
+| `d` | delete the marked (or highlighted) items, after asking |
 | `e` | edit in `$EDITOR` |
-| `d` | delete (asks first) |
-| `g` `i` `m` `r` `I` `x` | generate, insert, mkdir, rename, import, export — each opens the command line pre-filled |
-| `:` | run any explore-mode command (`:git log`, `:find bank`, `:cp a b`, ...) |
+| `g` `i` `m` `I` `E` | generate, insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
+| `:` | run any explore-mode command (`:git log`, `:find bank`, ...) |
+| `Esc` | clear the filter, then marks, then the buffer |
 | `R` / `?` / `q` | refresh / help / quit |
 
-- Only the first line of an entry (the password) is masked; the rest (`user:`,
-  `url:`, notes) is shown once decrypted. A revealed password re-masks after
-  `PASSWORD_STORE_CLIP_TIME` (45 s), and plaintext is dropped as soon as the
-  selection moves.
+- Pasting moves with `pass mv` / copies with `pass cp`, so entries are
+  re-encrypted when they land under a different `.gpg-id` and every change is
+  a git commit. Overwriting an existing entry asks first; copying into the same
+  folder makes `name-copy`.
+- Passwords are never on screen unless you open `v` and press `space`; a
+  revealed password re-masks after `PASSWORD_STORE_CLIP_TIME` (45 s), and the
+  plaintext is dropped when the popup closes. The rest of the entry (`user:`,
+  `url:`, notes) is shown in the popup.
+- Recent entries persist in `$XDG_STATE_HOME/ezer-pass/recent` (names only).
 - Decryption first runs with gpg's pinentry disabled, so when gpg-agent already
   has your passphrase the screen never flickers. Otherwise the TUI steps aside
   for pinentry, then comes straight back. The same hand-over happens for
@@ -147,7 +169,21 @@ JVBERi0xLjcKJcTl8uXrp/Og0MTGCjQgMCBvYmoK...
 ```
 
 `show` recognizes the marker and reports file metadata instead of dumping base64;
-`export` decodes it, defaulting to the original filename. Imports over 1 MiB are
+`export` decodes it, defaulting to the original filename.
+
+Because entry contents are encrypted, ezer-pass can't tell a file from a
+password without decrypting it. Instead it keeps `.files` in the store root — a
+git-tracked list of file-entry paths and sizes — so the TUI and `ls` can show
+files in their own color without a single decrypt. ezer-pass updates it on
+`import`, `mv`, `cp`, `rm` and paste, and corrects it whenever an entry is
+decrypted, so changes made with plain `pass` heal the next time you view the
+entry. It reveals only *that* an entry is a file; the names are already
+unencrypted.
+
+In the TUI, file entries are magenta with a `▪`; the info pane shows their size,
+and `Enter` (or `E`) opens `:export <entry> ` — add a destination, or press
+Enter again to write the original filename to the current directory. `c` won't
+copy a file entry (it would only grab the marker line). Imports over 1 MiB are
 refused without `--force` — a password store is a poor home for large blobs.
 
 ## Environment
@@ -155,7 +191,7 @@ refused without `--force` — a password store is a poor home for large blobs.
 | Variable | Effect |
 |---|---|
 | `PASSWORD_STORE_DIR` | store location (default `~/.password-store`), same as pass |
-| `PASSWORD_STORE_CLIP_TIME` | seconds before a revealed password re-masks in the TUI (default 45), same as pass's clipboard timeout |
+| `PASSWORD_STORE_CLIP_TIME` | seconds before a revealed password re-masks in the TUI (default 45) and the recent-pane countdown, same as pass's clipboard timeout |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |
 
 ## Development

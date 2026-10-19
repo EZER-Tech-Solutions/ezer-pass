@@ -5,6 +5,7 @@
 
 mod commands;
 mod fileio;
+mod index;
 mod pass;
 mod repl;
 mod store;

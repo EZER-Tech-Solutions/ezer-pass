@@ -1,4 +1,4 @@
-use crate::{fileio, pass, store};
+use crate::{fileio, index, pass, store};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::path::Path;
@@ -14,6 +14,8 @@ pub struct Session {
     /// Current store directory ("" = root).
     pub cwd: String,
     pub interactive: bool,
+    /// Which entries are file entries; see `index`.
+    pub files: index::FileIndex,
 }
 
 pub enum Outcome {
@@ -24,10 +26,12 @@ pub enum Outcome {
 impl Session {
     pub fn new(store: store::Store, interactive: bool) -> Self {
         // initialize the session with the store and set the current working directory to root
+        let files = index::FileIndex::load(store.root());
         Session {
             store,
             cwd: String::new(),
             interactive,
+            files,
         }
     }
 
@@ -124,6 +128,15 @@ fn expect_args(positional: &[&str], usage: &str, min: usize, max: usize) -> Resu
 
 /// Run a command in the given session, returning an Outcome indicating whether to continue or exit.
 pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
+    let result = dispatch(sess, argv);
+    // Persist whatever the command taught the file index, even on failure
+    // (a batch may have half-succeeded).
+    sess.files.prune(|p| sess.store.is_entry(p));
+    sess.files.save(sess.store.root());
+    result
+}
+
+fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
     let cmd = argv[0].as_str();
     let args = &argv[1..];
     let (flags, positional) = split_flags(args);
@@ -209,6 +222,8 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
                 }
                 None => pass::run_interactive(&pass_args)?,
             }
+            // Whatever was there, it now starts with a password.
+            sess.files.remove(&path);
         }
         "edit" => {
             expect_args(&positional, "edit <entry>", 1, 1)?;
@@ -223,18 +238,35 @@ pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             pass_args.extend(&flags);
             pass_args.push("--");
             pass_args.push(&path);
-            pass::run_interactive(&pass_args)?
+            pass::run_interactive(&pass_args)?;
+            // Only forget what is really gone (e.g. not a refused `rm -r`
+            // of a directory that pass left in place).
+            if !sess.store.is_entry(&path) && !sess.store.is_dir(&path) {
+                sess.files.remove(&path);
+            }
         }
         "mv" | "cp" => {
             expect_args(&positional, "mv|cp [-f] <src> <dest>", 2, 2)?;
             let src = sess.resolve(positional[0]);
             let dest = sess.resolve(positional[1]);
+            // Where pass will actually put it: into `dest` if that is an
+            // existing directory (or written with a trailing slash).
+            let landed = if sess.store.is_dir(&dest) || positional[1].ends_with('/') {
+                let name = src.rsplit('/').next().unwrap_or(&src);
+                store::resolve(&dest, name)
+            } else {
+                dest.clone()
+            };
             let mut pass_args = vec![cmd];
             pass_args.extend(&flags);
             pass_args.push("--");
             pass_args.push(&src);
             pass_args.push(&dest);
-            pass::run_interactive(&pass_args)?
+            pass::run_interactive(&pass_args)?;
+            let moved = cmd == "cp" || !(sess.store.is_entry(&src) || sess.store.is_dir(&src));
+            if moved {
+                sess.files.transfer(&src, &landed, cmd == "cp");
+            }
         }
         "git" => {
             if args.is_empty() {
@@ -274,6 +306,8 @@ fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
         for node in nodes {
             if node.is_dir {
                 println!("{}/", node.name.blue().bold());
+            } else if sess.files.is_file(&store::resolve(&path, &node.name)) {
+                println!("{}", node.name.magenta());
             } else {
                 println!("{}", node.name);
             }
@@ -287,7 +321,7 @@ fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
 }
 
 /// Show the contents of a store entry, optionally copying it to the clipboard.
-fn cmd_show(sess: &Session, arg: &str, clip: bool) -> Result<()> {
+fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
     let path = sess.resolve_entry(arg)?;
     if clip {
         // pass prints its own "Copied ... to clipboard" and handles clearing.
@@ -296,6 +330,7 @@ fn cmd_show(sess: &Session, arg: &str, clip: bool) -> Result<()> {
     let content = pass::show(&path)?;
     if fileio::marker_filename(&content).is_some() {
         let entry = fileio::decode_payload(&content)?;
+        sess.files.insert(&path, entry.data.len() as u64);
         println!(
             "{} {} ({} bytes) — use {} to write it out",
             "file entry:".yellow().bold(),
@@ -304,13 +339,14 @@ fn cmd_show(sess: &Session, arg: &str, clip: bool) -> Result<()> {
             format!("`export {arg}`").green()
         );
     } else {
+        sess.files.remove(&path);
         print!("{content}");
     }
     Ok(())
 }
 
 /// Insert a new entry into the store.
-fn cmd_insert(sess: &Session, flags: &[&str], positional: &[&str]) -> Result<()> {
+fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result<()> {
     // `insert --file <os-file> <entry>` is an alias for `import`.
     if flags.contains(&"--file") {
         expect_args(positional, "insert --file [--force] <file> <entry>", 2, 2)?;
@@ -323,11 +359,13 @@ fn cmd_insert(sess: &Session, flags: &[&str], positional: &[&str]) -> Result<()>
     pass_args.extend(flags);
     pass_args.push("--");
     pass_args.push(&path);
-    pass::run_interactive(&pass_args)
+    pass::run_interactive(&pass_args)?;
+    sess.files.remove(&path);
+    Ok(())
 }
 
 /// Import a file from the OS filesystem into the password store as a base64-encoded entry.
-fn cmd_import(sess: &Session, os_file: &str, entry: &str, force: bool) -> Result<()> {
+fn cmd_import(sess: &mut Session, os_file: &str, entry: &str, force: bool) -> Result<()> {
     let path = sess.resolve(entry);
     if sess.store.is_entry(&path) && !force {
         bail!(
@@ -356,6 +394,7 @@ fn cmd_import(sess: &Session, os_file: &str, entry: &str, force: bool) -> Result
         .to_string_lossy();
     let payload = fileio::encode_payload(&filename, &data);
     pass::insert_multiline(&path, payload.as_bytes())?;
+    sess.files.insert(&path, data.len() as u64);
     println!(
         "imported {os_file} ({} bytes) as {}",
         data.len(),
@@ -365,11 +404,15 @@ fn cmd_import(sess: &Session, os_file: &str, entry: &str, force: bool) -> Result
 }
 
 /// Export a file entry from the password store back to the OS filesystem.
-fn cmd_export(sess: &Session, entry: &str, dest: Option<&str>, force: bool) -> Result<()> {
+fn cmd_export(sess: &mut Session, entry: &str, dest: Option<&str>, force: bool) -> Result<()> {
     let path = sess.resolve_entry(entry)?;
     let content = pass::show(&path)?;
+    if fileio::marker_filename(&content).is_none() {
+        sess.files.remove(&path);
+    }
     let file = fileio::decode_payload(&content)
         .with_context(|| format!("{} is not a file entry", store::display(&path)))?;
+    sess.files.insert(&path, file.data.len() as u64);
     let mut dest = std::path::PathBuf::from(dest.unwrap_or(&file.filename));
     if dest.is_dir() {
         dest.push(&file.filename);

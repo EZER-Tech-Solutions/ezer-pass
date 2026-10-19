@@ -51,23 +51,6 @@ fn contains(hay: &[char], needle: &[char]) -> bool {
     needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Filter and rank `items` (store path, is_dir) against `query`: best score
-/// first, then shorter paths, then alphabetical.
-pub fn rank(query: &str, items: &[(String, bool)]) -> Vec<(String, bool)> {
-    let mut scored: Vec<(i64, &(String, bool))> = items
-        .iter()
-        .filter_map(|item| score(query, &item.0).map(|s| (s, item)))
-        .collect();
-    if !query.trim().is_empty() {
-        scored.sort_by(|(sa, a), (sb, b)| {
-            sb.cmp(sa)
-                .then(a.0.len().cmp(&b.0.len()))
-                .then(a.0.cmp(&b.0))
-        });
-    }
-    scored.into_iter().map(|(_, item)| item.clone()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,16 +87,5 @@ mod tests {
         let a = score("mail", "personal/mail").unwrap();
         let b = score("mail", "mail/personal").unwrap();
         assert!(a > b, "{a} <= {b}");
-    }
-
-    #[test]
-    fn rank_orders_and_filters() {
-        let items: Vec<(String, bool)> = ["work/ebay", "servers/web1", "apple/id", "servers"]
-            .iter()
-            .map(|s| (s.to_string(), false))
-            .collect();
-        let ranked: Vec<String> = rank("web", &items).into_iter().map(|i| i.0).collect();
-        assert_eq!(ranked, ["servers/web1", "work/ebay"]);
-        assert_eq!(rank("", &items).len(), 4);
     }
 }

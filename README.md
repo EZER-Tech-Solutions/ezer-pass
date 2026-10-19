@@ -30,20 +30,21 @@ cargo install --path .
 Run `ezer-pass` with no arguments:
 
 ```
-┌ ezer-pass  ──────────────────────────────────────────── ~/.password-store ┐
+╭ ezer-pass  ──────────────────────────────────────────── ~/.password-store ╮
 │   ▾ servers/                                                              │
-│ ●   ▸ prod/                                                               │
-│▌✂     web1                                                                │
+│ ● ├─▸ prod/                                                               │
+│▌✂ ├─• web1                                                                │
+│   └─▪ tls-cert                                                            │
 │   ▸ personal/                                                             │
-└───────────────────────────────────────────────────────────────────────────┘
-┌ recent ─────────────────────────┐┌ info ──────────────────────────────────┐
-│ 1 /servers/web1  ⧉ 32s          ││/servers/web1                           │
-│ 2 /apple/id                     ││password · modified 3 days ago          │
-│                                 ││✂ cut web1  p paste                     │
-│                                 ││● 1 marked  x cut · y copy · d delete   │
-│                                 ││git origin/master ↑2 unpushed           │
-└─────────────────────────────────┘└────────────────────────────────────────┘
-⏎ copy/open  v view  space mark  x/y/p cut/copy/paste  r rename  / filter  ? help
+╰────────────────────────────────────────────────────────────────────── 3/5 ╯
+╭ recent ─────────────────────────╮╭ info ──────────────────────────────────╮
+│ 1 /servers/web1       ▰▰▰▱▱ 32s ││ /servers/web1                          │
+│ 2 /apple/id                     ││ password · modified 3 days ago         │
+│                                 ││ buffer  ✂ cut web1   p paste           │
+│                                 ││ marks   ● 1 marked   x cut y copy d …  │
+│                                 ││ git     origin/master  ↑2 to push      │
+╰─────────────────────────────────╯╰────────────────────────────────────────╯
+⏎ copy/open  v view  space mark  x y p cut/copy/paste  r rename  / filter  ? help
 ```
 
 The top pane is a collapsible tree of the store. The bottom pane shows your

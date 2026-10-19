@@ -146,6 +146,8 @@ pub struct App {
     pub ahead: u64,
     pub quit: bool,
     pub clip_time: Duration,
+    /// Rows the tree shows at once, set by each draw; PgUp/PgDn move by it.
+    pub page: usize,
     history: Vec<String>,
     history_pos: Option<usize>,
 }
@@ -182,6 +184,7 @@ impl App {
             ahead: 0,
             quit: false,
             clip_time: Duration::from_secs(clip_time),
+            page: 10,
             history: Vec::new(),
             history_pos: None,
         };
@@ -521,8 +524,8 @@ impl App {
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::PageDown => self.move_by(10),
-            KeyCode::PageUp => self.move_by(-10),
+            KeyCode::PageDown => self.move_by(self.page.max(1) as isize),
+            KeyCode::PageUp => self.move_by(-(self.page.max(1) as isize)),
             KeyCode::Home => self.select(0),
             KeyCode::End => self.select(usize::MAX),
             KeyCode::Char('l') | KeyCode::Right => {

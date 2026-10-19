@@ -1,10 +1,14 @@
-use super::app::{App, Confirm, Mode, Secret, basename};
+use super::app::{App, Confirm, Mode, Row, Secret, basename};
 use crate::{index, store};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::symbols::scrollbar;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use std::time::SystemTime;
 
 const ACCENT: Color = Color::Green;
@@ -12,9 +16,12 @@ const DIR: Color = Color::Blue;
 const MARK: Color = Color::Yellow;
 /// File entries (base64-stored files), told apart via the file index.
 const FILE: Color = Color::Magenta;
+const DANGER: Color = Color::Red;
 const MASK: &str = "••••••••••••";
 /// Width of the highlight bar the list draws before every row.
 const BAR: &str = "▌";
+/// Width of the label column in the info pane.
+const LABEL: usize = 8;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [tree, bottom, footer] = Layout::vertical([
@@ -31,6 +38,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_info(f, info, app);
     draw_footer(f, footer, app);
 
+    if matches!(app.mode, Mode::Confirm(_) | Mode::View(_) | Mode::Help) {
+        // Push everything behind a popup into the background.
+        let area = f.area();
+        f.buffer_mut().set_style(area, Style::new().dim());
+    }
     match &app.mode {
         Mode::Confirm(confirm) => draw_confirm(f, confirm, app.upstream.as_deref()),
         Mode::View(_) => draw_view(f, app),
@@ -41,26 +53,101 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn pane(title: &str) -> Block<'_> {
     Block::bordered()
+        .border_type(BorderType::Rounded)
         .title(Line::from(format!(" {title} ")).bold())
         .border_style(Style::new().dim())
 }
 
+fn popup(title: Line<'static>, color: Color) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title)
+        .border_style(Style::new().fg(color))
+        .padding(Padding::horizontal(1))
+}
+
+/// How an entry's name is drawn: file entries in their own color.
+fn entry_style(app: &App, path: &str) -> Style {
+    if app.sess.files.is_file(path) {
+        Style::new().fg(FILE)
+    } else {
+        Style::new()
+    }
+}
+
+/// A store path as a dim parent followed by the name in `style`.
+fn path_spans(path: &str, style: Style) -> Vec<Span<'static>> {
+    let shown = store::display(path);
+    let split = shown.rfind('/').map_or(0, |i| i + 1);
+    vec![
+        shown[..split].to_string().dim(),
+        Span::styled(shown[split..].to_string(), style),
+    ]
+}
+
+/// Tree guides for each row: `│ ` under ancestors with siblings further
+/// down, then `├─`/`└─` joining the row to its parent. Two columns per level
+/// below the top, which the rename cursor relies on.
+fn guides(rows: &[Row]) -> Vec<String> {
+    let mut out = vec![String::new(); rows.len()];
+    // more[d]: a later row at depth d shares the current row's ancestry.
+    let mut more: Vec<bool> = Vec::new();
+    for (i, row) in rows.iter().enumerate().rev() {
+        let d = row.depth;
+        more.resize(d + 1, false);
+        let mut g: String = (1..d).map(|k| if more[k] { "│ " } else { "  " }).collect();
+        if d > 0 {
+            g.push_str(if more[d] { "├─" } else { "└─" });
+        }
+        out[i] = g;
+        more[d] = true;
+    }
+    out
+}
+
 fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
     let root = short_root(app, area.width.saturating_sub(16) as usize);
-    let block = Block::bordered()
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
         .title(Line::from(vec![
             " ezer-pass ".fg(Color::Black).bg(ACCENT).bold(),
             " ".into(),
         ]))
         .title_top(Line::from(format!(" {root} ").dim()).right_aligned())
         .border_style(Style::new().dim());
+    if app.filtering() {
+        let matches = app.rows.iter().filter(|r| !r.context_only).count();
+        block = block.title_bottom(
+            Line::from(format!(
+                " {matches} match{} ",
+                if matches == 1 { "" } else { "es" }
+            ))
+            .fg(ACCENT),
+        );
+    }
+    if let Some(i) = app.list.selected() {
+        block = block.title_bottom(
+            Line::from(format!(" {}/{} ", i + 1, app.rows.len()).dim()).right_aligned(),
+        );
+    }
+    app.page = area.height.saturating_sub(2) as usize;
+
     if app.rows.is_empty() {
-        let msg = if app.filtering() {
-            "no matches"
+        let msg: Vec<Line> = if app.filtering() {
+            vec!["no matches".dim().into()]
         } else {
-            "(empty store)"
+            vec![
+                "the store is empty".dim().into(),
+                "".into(),
+                hint(&[("i", "insert"), ("g", "generate"), ("I", "import a file")]),
+            ]
         };
-        f.render_widget(Paragraph::new(msg.dim()).block(block), area);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let [middle] = Layout::vertical([Constraint::Length(msg.len() as u16)])
+            .flex(Flex::Center)
+            .areas(inner);
+        f.render_widget(Paragraph::new(msg).centered(), middle);
         return;
     }
 
@@ -76,11 +163,15 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
         Mode::Rename { path, input } => Some((path.as_str(), input)),
         _ => None,
     };
+    let selected = app.list.selected();
+    let guides = guides(&app.rows);
 
     let items: Vec<ListItem> = app
         .rows
         .iter()
-        .map(|row| {
+        .zip(guides)
+        .enumerate()
+        .map(|(i, (row, guide))| {
             let flag = if app.marks.contains(&row.path) {
                 "● ".fg(MARK).bold()
             } else if cut.contains(&row.path.as_str()) {
@@ -96,9 +187,9 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                 (true, true) => "▾ ".fg(DIR),
                 (true, false) => "▸ ".fg(DIR),
                 (false, _) if is_file => "▪ ".fg(FILE),
-                (false, _) => "  ".into(),
+                (false, _) => "• ".dim(),
             };
-            let mut spans = vec![flag, Span::raw("  ".repeat(row.depth)), icon];
+            let mut spans = vec![flag, guide.dim(), icon];
             match renaming {
                 Some((path, input)) if path == row.path => {
                     spans.push(input.text.clone().underlined());
@@ -114,6 +205,9 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                     if row.context_only || cut.contains(&row.path.as_str()) {
                         name = name.dim();
                     }
+                    if selected == Some(i) {
+                        name = name.reversed().bold();
+                    }
                     spans.push(name);
                 }
             }
@@ -122,9 +216,25 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(BAR);
+        .highlight_symbol(BAR.fg(ACCENT))
+        .scroll_padding(2);
     f.render_stateful_widget(list, area, &mut app.list);
+
+    if app.rows.len() > app.page {
+        let mut state = ScrollbarState::new(app.rows.len().saturating_sub(app.page))
+            .position(app.list.offset());
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .symbols(scrollbar::VERTICAL)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .track_style(Style::new().dim())
+                .thumb_style(Style::new().fg(ACCENT)),
+            area.inner(Margin::new(0, 1)),
+            &mut state,
+        );
+    }
 
     // Put the terminal cursor in the row being renamed.
     if let (Some((_, input)), Some(row), Some(i)) = (renaming, app.selected(), app.list.selected())
@@ -138,34 +248,65 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// `▰▰▰▱▱`: how much of `total` is left.
+fn meter(left: u64, total: u64, cells: usize) -> String {
+    let filled = (left * cells as u64)
+        .div_ceil(total.max(1))
+        .min(cells as u64) as usize;
+    "▰".repeat(filled) + &"▱".repeat(cells - filled)
+}
+
 fn draw_recent(f: &mut Frame, area: Rect, app: &App) {
+    let width = area.width.saturating_sub(2) as usize;
     let clip = app.clip_remaining();
     let mut lines: Vec<Line> = app
         .recent
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            let shown = store::display(path);
-            let mut spans = vec![
-                format!(" {} ", i + 1).fg(ACCENT).bold(),
-                if app.sess.files.is_file(path) {
-                    shown.fg(FILE)
-                } else {
-                    shown.into()
-                },
-            ];
+            let mut spans = vec![format!(" {} ", i + 1).fg(ACCENT).bold()];
+            spans.extend(path_spans(path, entry_style(app, path)));
+            let mut line = Line::from(spans);
             if let Some((p, secs)) = clip
                 && p == path
             {
-                spans.push(format!("  ⧉ {secs}s").fg(MARK));
+                // Right-align the clipboard countdown, dropping the meter
+                // when space is short.
+                let full = format!("{} {secs}s ", meter(secs, app.clip_time.as_secs(), 5));
+                let short = format!("{secs}s ");
+                let room = width.saturating_sub(line.width() + 2);
+                let tail = if full.chars().count() <= room {
+                    full
+                } else {
+                    short
+                };
+                let gap = width
+                    .saturating_sub(line.width() + tail.chars().count())
+                    .max(2);
+                line.push_span(" ".repeat(gap));
+                line.push_span(tail.fg(MARK));
             }
-            Line::from(spans)
+            line
         })
         .collect();
     if lines.is_empty() {
-        lines.push(" copy with ⏎ or c; recent ones land here".dim().into());
+        lines.push(" entries you copy or view land here".dim().into());
+        lines.push(Line::from(vec![
+            "  ".into(),
+            "1".fg(ACCENT).bold(),
+            "-".dim(),
+            "5".fg(ACCENT).bold(),
+            " use them again".dim(),
+        ]));
     }
     f.render_widget(Paragraph::new(lines).block(pane("recent")), area);
+}
+
+/// An info-pane row: a dim fixed-width label, then its value.
+fn labeled(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![format!("{label:<LABEL$}").dim()];
+    spans.append(&mut value);
+    Line::from(spans)
 }
 
 fn draw_info(f: &mut Frame, area: Rect, app: &App) {
@@ -173,12 +314,9 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
 
     match app.selected() {
         Some(row) if row.is_dir => {
-            lines.push(
-                format!("{}/", store::display(&row.path))
-                    .fg(DIR)
-                    .bold()
-                    .into(),
-            );
+            let mut name = path_spans(&row.path, Style::new().fg(DIR).bold());
+            name.push("/".fg(DIR).bold());
+            lines.push(Line::from(name));
             let detail = match app.sess.store.list(&row.path) {
                 Ok(children) => {
                     let count = |pred: &dyn Fn(&store::Node) -> bool| {
@@ -208,22 +346,28 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         }
         Some(row) => {
             let size = app.sess.files.size(&row.path);
-            let mut detail = match size {
-                Some(bytes) => format!("file · {}", index::human_size(bytes)),
-                None => "password".to_string(),
+            let style = if size.is_some() {
+                Style::new().fg(FILE).bold()
+            } else {
+                Style::new().bold()
             };
+            lines.push(Line::from(path_spans(&row.path, style)));
+            let mut detail = vec![
+                match size {
+                    Some(bytes) => format!("file · {}", index::human_size(bytes)),
+                    None => "password".to_string(),
+                }
+                .dim(),
+            ];
             if let Some(t) = app.sess.store.modified(&row.path) {
-                detail.push_str(&format!(" · modified {}", ago(t)));
+                detail.push(format!(" · modified {}", ago(t)).dim());
             }
             if size.is_some() {
-                lines.push(Line::from(vec![
-                    store::display(&row.path).fg(FILE).bold(),
-                    "  ⏎ export · v view".dim(),
-                ]));
-            } else {
-                lines.push(store::display(&row.path).bold().into());
+                detail.push("   ".into());
+                detail.push("⏎".fg(ACCENT).bold());
+                detail.push(" export".dim());
             }
-            lines.push(detail.dim().into());
+            lines.push(Line::from(detail));
         }
         None => {
             lines.push("nothing selected".dim().into());
@@ -231,38 +375,57 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    lines.push(match &app.buffer {
-        Some(b) => {
-            let names: Vec<&str> = b.paths.iter().map(|p| basename(p)).collect();
-            Line::from(vec![
-                if b.cut { "✂ cut " } else { "+ copied " }.fg(MARK).bold(),
-                names.join(", ").into(),
-                "  p paste".dim(),
-            ])
-        }
-        None => "buffer empty · x cut · y copy".dim().into(),
-    });
+    lines.push(labeled(
+        "buffer",
+        match &app.buffer {
+            Some(b) => {
+                let names: Vec<&str> = b.paths.iter().map(|p| basename(p)).collect();
+                vec![
+                    if b.cut { "✂ cut " } else { "+ copied " }.fg(MARK).bold(),
+                    names.join(", ").into(),
+                    "   ".into(),
+                    "p".fg(ACCENT).bold(),
+                    " paste".dim(),
+                ]
+            }
+            None => vec!["empty".dim()],
+        },
+    ));
 
-    lines.push(if app.marks.is_empty() {
-        "".into()
-    } else {
-        Line::from(vec![
-            format!("● {} marked", app.marks.len()).fg(MARK).bold(),
-            "  x cut · y copy · d delete · esc clear".dim(),
-        ])
-    });
+    lines.push(labeled(
+        "marks",
+        if app.marks.is_empty() {
+            vec!["none".dim()]
+        } else {
+            vec![
+                format!("● {} marked", app.marks.len()).fg(MARK).bold(),
+                "   ".into(),
+                "x".fg(ACCENT).bold(),
+                " cut ".dim(),
+                "y".fg(ACCENT).bold(),
+                " copy ".dim(),
+                "d".fg(ACCENT).bold(),
+                " delete".dim(),
+            ]
+        },
+    ));
 
-    lines.push(match &app.upstream {
-        Some(up) if app.ahead > 0 => Line::from(vec![
-            "git ".dim(),
-            up.as_str().into(),
-            format!(" ↑{} unpushed", app.ahead).yellow(),
-        ]),
-        Some(up) => Line::from(vec!["git ".dim(), up.as_str().into(), " ✓ in sync".dim()]),
-        None => "git: no upstream".dim().into(),
-    });
+    lines.push(labeled(
+        "git",
+        match &app.upstream {
+            Some(up) if app.ahead > 0 => vec![
+                up.clone().into(),
+                format!("  ↑{} to push", app.ahead).fg(MARK),
+            ],
+            Some(up) => vec![up.clone().into(), "  ✓ in sync".fg(ACCENT)],
+            None => vec!["no upstream".dim()],
+        },
+    ));
 
-    f.render_widget(Paragraph::new(lines).block(pane("info")), area);
+    f.render_widget(
+        Paragraph::new(lines).block(pane("info").padding(Padding::left(1))),
+        area,
+    );
 }
 
 /// The first line of a text entry is the password: masked unless revealed.
@@ -271,10 +434,13 @@ fn secret_lines(text: &str, revealed: bool) -> Vec<Line<'_>> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
     let mut out = vec![if revealed {
-        first.yellow().bold().into()
+        first.fg(MARK).bold().into()
     } else {
         MASK.dim().into()
     }];
+    if text.lines().nth(1).is_some() {
+        out.push("".into());
+    }
     for line in lines {
         out.push(match line.split_once(": ") {
             Some((k, v)) if !k.is_empty() && !k.contains(' ') => {
@@ -290,30 +456,44 @@ fn draw_view(f: &mut Frame, app: &App) {
     let Mode::View(view) = &app.mode else {
         return;
     };
-    let mut lines = match &view.secret {
+    let lines = match &view.secret {
         Secret::Text(text) => secret_lines(text, view.revealed_at.is_some()),
         Secret::File { filename, size } => vec![
-            Line::from(vec![
-                "file entry ".yellow().bold(),
-                filename.as_str().into(),
-            ]),
-            format!("{size} bytes").dim().into(),
+            Line::from(vec!["▪ ".fg(FILE), filename.as_str().fg(FILE).bold()]),
+            format!("file entry · {}", index::human_size(*size as u64))
+                .dim()
+                .into(),
         ],
     };
-    lines.push("".into());
-    lines.push(match &view.secret {
+    let mut keys = match &view.secret {
+        Secret::Text(_) if view.revealed_at.is_some() => {
+            hint(&[("space", "hide"), ("c", "copy"), ("esc", "close")])
+        }
         Secret::Text(_) => hint(&[("space", "reveal"), ("c", "copy"), ("esc", "close")]),
         Secret::File { .. } => hint(&[("E", "export"), ("esc", "close")]),
-    });
-    let width = (f.area().width * 6 / 10).max(40);
-    let area = popup_fixed(f.area(), width, lines.len() as u16 + 2);
+    };
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let mut title = vec![" ".into()];
+    title.extend(path_spans(
+        &view.path,
+        entry_style(app, &view.path).add_modifier(ratatui::style::Modifier::BOLD),
+    ));
+    title.push(" ".into());
+    let mut block = popup(Line::from(title), ACCENT)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(2, 2, 1, 1));
+    if let Some(t) = view.revealed_at {
+        let left = app.clip_time.saturating_sub(t.elapsed()).as_secs() + 1;
+        block = block.title_bottom(format!(" hides in {left}s ").fg(MARK));
+    }
+    let width = (f.area().width * 6 / 10).max(44);
+    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::bordered()
-                .title(format!(" {} ", store::display(&view.path)))
-                .border_style(Style::new().fg(ACCENT)),
-        ),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
         area,
     );
 }
@@ -328,10 +508,21 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             .filter
             .as_ref()
             .map(|flt| (vec!["/".fg(ACCENT).bold()], &flt.input)),
+        Mode::Rename { input, .. } => Some((vec!["rename ".fg(ACCENT).bold()], input)),
         _ => None,
     };
     if let Some((mut spans, input)) = input {
-        let offset: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if let Mode::Rename { .. } = app.mode {
+            // The name is edited in the tree; the footer only says how.
+            spans.push("⏎".fg(ACCENT).bold());
+            spans.push(" save  ".dim());
+            spans.push("esc".fg(ACCENT).bold());
+            spans.push(" cancel  ".dim());
+            spans.push("../ and /abs move it".dim());
+            f.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
+        let offset: usize = spans.iter().map(|s| s.width()).sum();
         spans.push(input.text.as_str().into());
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         let x = area.x + (offset + input.cursor_col()) as u16;
@@ -339,26 +530,34 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let line = match &app.status {
-        Some(s) if s.error => Line::from(s.text.as_str().red()),
+        Some(s) if s.error => Line::from(vec!["✗ ".fg(DANGER).bold(), s.text.as_str().fg(DANGER)]),
         Some(s) => Line::from(s.text.as_str().fg(ACCENT)),
-        None if app.filtering() => Line::from(vec![
-            "/".fg(ACCENT).bold(),
-            app.filter
-                .as_ref()
-                .map_or("", |f| f.input.text.as_str())
-                .into(),
-            "   esc clear · / edit".dim(),
-        ]),
-        None => hint(&[
-            ("⏎", "copy/open"),
-            ("v", "view"),
-            ("space", "mark"),
-            ("x/y/p", "cut/copy/paste"),
-            ("r", "rename"),
-            ("/", "filter"),
-            ("1-5", "recent"),
-            ("?", "help"),
-        ]),
+        None if app.filtering() => {
+            let mut spans = vec![
+                "/".fg(ACCENT).bold(),
+                app.filter
+                    .as_ref()
+                    .map_or("", |f| f.input.text.as_str())
+                    .into(),
+                "   ".into(),
+            ];
+            spans.extend(hint(&[("esc", "clear"), ("/", "edit")]).spans);
+            Line::from(spans)
+        }
+        None => hint_fit(
+            &[
+                ("⏎", "copy/open"),
+                ("v", "view"),
+                ("space", "mark"),
+                ("x y p", "cut/copy/paste"),
+                ("r", "rename"),
+                ("/", "filter"),
+                ("1-5", "recent"),
+                (":", "command"),
+                ("?", "help"),
+            ],
+            area.width as usize,
+        ),
     };
     f.render_widget(Paragraph::new(line), area);
 }
@@ -375,10 +574,27 @@ fn hint(keys: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// `hint`, dropping trailing keys that don't fit in `width` columns — but
+/// always keeping the last one (help).
+fn hint_fit(keys: &[(&str, &str)], width: usize) -> Line<'static> {
+    let mut n = keys.len();
+    while n > 1 {
+        let mut shown: Vec<(&str, &str)> = keys[..n - 1].to_vec();
+        shown.push(keys[keys.len() - 1]);
+        let line = hint(&shown);
+        if line.width() <= width {
+            return line;
+        }
+        n -= 1;
+    }
+    hint(&keys[keys.len() - 1..])
+}
+
 fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let (question, default_yes) = match confirm {
+    let (title, question, default_yes) = match confirm {
         Confirm::Delete(targets) => (
+            "delete",
             match targets.as_slice() {
                 [(path, true)] => format!(
                     "delete folder {}/ and everything in it?",
@@ -398,6 +614,7 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
             false,
         ),
         Confirm::Overwrite { conflicts, .. } => (
+            "overwrite",
             format!(
                 "{conflicts} entr{} already exist{} there — overwrite?",
                 if *conflicts == 1 { "y" } else { "ies" },
@@ -406,10 +623,12 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
             false,
         ),
         Confirm::Pull => (
+            "git pull",
             format!("pull from {}?", upstream.unwrap_or("upstream")),
             true,
         ),
         Confirm::Push { ahead } => (
+            "git push",
             format!(
                 "push {ahead} commit{} to {}?",
                 plural(*ahead as usize),
@@ -418,64 +637,135 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
             true,
         ),
     };
-    let choices = if default_yes { "[Y/n]" } else { "[y/N]" };
-    let width = (question.chars().count() + 10).clamp(30, f.area().width as usize) as u16;
-    let area = popup_fixed(f.area(), width, 5);
+    let color = if default_yes { ACCENT } else { DANGER };
+    // The default answer is a filled button; the other is plain.
+    let button = |key: &str, label: &str, default: bool| -> Vec<Span<'static>> {
+        let text = format!(" {key} {label} ");
+        if default {
+            vec![text.fg(Color::Black).bg(color).bold()]
+        } else {
+            vec![text.dim()]
+        }
+    };
+    let mut buttons = button("y", "yes", default_yes);
+    buttons.push("   ".into());
+    buttons.extend(button("n", "no", !default_yes));
+
+    let width = (question.chars().count() + 8).clamp(36, f.area().width as usize) as u16;
+    let text_rows = question
+        .chars()
+        .count()
+        .div_ceil(width.saturating_sub(4).max(1) as usize);
+    let area = popup_fixed(f.area(), width, text_rows as u16 + 5);
     f.render_widget(Clear, area);
-    let color = if default_yes { ACCENT } else { Color::Red };
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(question),
-            "".into(),
-            Line::from(choices.fg(color).bold()),
-        ])
-        .centered()
-        .wrap(Wrap { trim: true })
-        .block(Block::bordered().border_style(Style::new().fg(color))),
+        Paragraph::new(vec![Line::from(question), "".into(), Line::from(buttons)])
+            .centered()
+            .wrap(Wrap { trim: true })
+            .block(
+                popup(Line::from(format!(" {title} ")).bold(), color)
+                    .padding(Padding::new(1, 1, 1, 0)),
+            ),
         area,
     );
 }
 
 fn draw_help(f: &mut Frame) {
-    let rows: &[(&str, &str)] = &[
-        ("j k ↑ ↓", "move (PgUp/PgDn/Home/End)"),
-        ("l →", "expand folder / step into it"),
-        ("h ←", "collapse folder / jump to parent"),
-        ("H ⌫", "collapse the folder you're in"),
-        ("⏎", "copy password · export file · toggle folder"),
-        ("-", "collapse everything"),
-        ("v", "view entry (space reveals)"),
-        ("c", "copy password to clipboard"),
-        ("1-5", "copy a recent entry again"),
-        ("/", "filter the tree (fuzzy)"),
-        ("space", "mark / unmark"),
-        ("x  y", "cut / copy marked (or highlighted)"),
-        ("p", "paste into highlighted folder"),
-        ("r", "rename in place (../ and /abs work)"),
-        ("d", "delete marked (or highlighted)"),
-        ("e", "edit entry in $EDITOR"),
-        ("g i m", "generate / insert / mkdir here"),
-        ("I  E", "import a file here / export entry"),
-        (":", "run any command (:git log, :find ...)"),
-        ("esc", "clear filter, then marks, then buffer"),
-        ("R  q", "refresh / quit (offers to push)"),
-    ];
-    let mut lines: Vec<Line> = rows
-        .iter()
-        .map(|(k, desc)| Line::from(vec![format!(" {k:<9}").fg(ACCENT).bold(), (*desc).into()]))
-        .collect();
-    lines.push("".into());
-    lines.push(" any key to close".dim().into());
-    let area = popup_fixed(f.area(), 54, lines.len() as u16 + 2);
-    f.render_widget(Clear, area);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .title(" keys ")
-                .border_style(Style::new().fg(ACCENT)),
+    let groups: &[(&str, &[(&str, &str)])] = &[
+        (
+            "move",
+            &[
+                ("j k ↑ ↓", "up / down"),
+                ("PgUp PgDn", "a page (Home/End: ends)"),
+                ("l →", "expand folder / step into it"),
+                ("h ←", "collapse folder / go to parent"),
+                ("H ⌫", "collapse the folder you're in"),
+                ("-", "collapse everything"),
+                ("/", "filter the tree (fuzzy)"),
+            ],
         ),
-        area,
-    );
+        (
+            "use",
+            &[
+                ("⏎", "copy password · export file"),
+                ("c", "copy password"),
+                ("v", "view entry (space reveals)"),
+                ("1-5", "use a recent entry again"),
+                ("e", "edit in $EDITOR"),
+                ("E", "export an entry to a file"),
+            ],
+        ),
+        (
+            "organize",
+            &[
+                ("space", "mark / unmark"),
+                ("x  y", "cut / copy marked or highlighted"),
+                ("p", "paste into highlighted folder"),
+                ("r", "rename in place"),
+                ("d", "delete marked or highlighted"),
+                ("esc", "clear filter, marks, then buffer"),
+            ],
+        ),
+        (
+            "create",
+            &[
+                ("g", "generate a password here"),
+                ("i", "insert a password here"),
+                ("m", "make a folder here"),
+                ("I", "import a file here"),
+            ],
+        ),
+        (
+            "more",
+            &[
+                (":", "any command (:git log, :find …)"),
+                ("R", "refresh"),
+                ("q", "quit (offers to push)"),
+            ],
+        ),
+    ];
+    let group_lines = |(name, rows): &(&str, &[(&str, &str)])| -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(name.to_uppercase()).fg(DIR).bold()];
+        lines.extend(rows.iter().map(|(k, desc)| {
+            Line::from(vec![
+                format!("{k:<11}").fg(ACCENT).bold(),
+                desc.to_string().into(),
+            ])
+        }));
+        lines.push("".into());
+        lines
+    };
+    let column = |groups: &[(&str, &[(&str, &str)])]| -> Vec<Line<'static>> {
+        let mut lines: Vec<Line> = groups.iter().flat_map(group_lines).collect();
+        lines.pop();
+        lines
+    };
+
+    const COL: u16 = 46;
+    let screen = f.area();
+    let two = screen.width >= 2 * COL + 6;
+    let block = popup(Line::from(" keys ").bold(), ACCENT)
+        .title_bottom(Line::from(" any key closes ".dim()).right_aligned())
+        .padding(Padding::new(2, 2, 1, 1));
+    if two {
+        let left = column(&groups[..2]);
+        let right = column(&groups[2..]);
+        let height = left.len().max(right.len()) as u16 + 4;
+        let area = popup_fixed(screen, 2 * COL + 6, height);
+        f.render_widget(Clear, area);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let [l, r] = Layout::horizontal([Constraint::Length(COL), Constraint::Length(COL)])
+            .spacing(2)
+            .areas(inner);
+        f.render_widget(Paragraph::new(left), l);
+        f.render_widget(Paragraph::new(right), r);
+    } else {
+        let lines = column(groups);
+        let area = popup_fixed(screen, COL + 6, lines.len() as u16 + 4);
+        f.render_widget(Clear, area);
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
 }
 
 /// The store root for the tree's title: `~` for $HOME, and cut from the
@@ -520,4 +810,50 @@ fn ago(t: SystemTime) -> String {
         s => (s / (86400 * 365), "year"),
     };
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(paths: &[(&str, bool)]) -> Vec<Row> {
+        paths
+            .iter()
+            .map(|(p, is_dir)| Row {
+                path: p.to_string(),
+                name: basename(p).to_string(),
+                depth: p.matches('/').count(),
+                is_dir: *is_dir,
+                context_only: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tree_guides() {
+        let r = rows(&[
+            ("a", true),
+            ("a/b", true),
+            ("a/b/c", false),
+            ("a/b/d", false),
+            ("a/e", false),
+            ("f", false),
+        ]);
+        assert_eq!(guides(&r), ["", "├─", "│ ├─", "│ └─", "└─", ""]);
+    }
+
+    #[test]
+    fn countdown_meter() {
+        assert_eq!(meter(45, 45, 5), "▰▰▰▰▰");
+        assert_eq!(meter(1, 45, 5), "▰▱▱▱▱");
+        assert_eq!(meter(23, 45, 5), "▰▰▰▱▱");
+    }
+
+    #[test]
+    fn hints_drop_from_the_end_but_keep_help() {
+        let keys = [("a", "one"), ("b", "two"), ("?", "help")];
+        assert_eq!(hint_fit(&keys, 100).width(), hint(&keys).width());
+        let narrow = hint_fit(&keys, 14);
+        assert_eq!(narrow.width(), hint(&[("a", "one"), ("?", "help")]).width());
+    }
 }

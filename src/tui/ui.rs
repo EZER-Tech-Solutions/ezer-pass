@@ -1,4 +1,5 @@
 use super::app::{App, Confirm, Mode, Row, Secret, basename};
+use super::sync::{Op, Sync};
 use crate::{index, store};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -38,7 +39,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_info(f, info, app);
     draw_footer(f, footer, app);
 
-    if matches!(app.mode, Mode::Confirm(_) | Mode::View(_) | Mode::Help) {
+    if matches!(
+        app.mode,
+        Mode::Confirm(_) | Mode::View(_) | Mode::Help | Mode::Sync(_)
+    ) {
         // Push everything behind a popup into the background.
         let area = f.area();
         f.buffer_mut().set_style(area, Style::new().dim());
@@ -47,6 +51,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Confirm(confirm) => draw_confirm(f, confirm, app.upstream.as_deref()),
         Mode::View(_) => draw_view(f, app),
         Mode::Help => draw_help(f),
+        Mode::Sync(sync) => draw_sync(f, sync, app.upstream.as_deref()),
         _ => {}
     }
 }
@@ -172,9 +177,17 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
         .zip(guides)
         .enumerate()
         .map(|(i, (row, guide))| {
-            let flag = if app.marks.contains(&row.path) {
-                "● ".fg(MARK).bold()
-            } else if cut.contains(&row.path.as_str()) {
+            // The side bar: marked rows get it in the mark color, the
+            // highlighted row in the accent (the pill on its name still
+            // shows where the cursor is when both apply).
+            let bar = if app.marks.contains(&row.path) {
+                BAR.fg(MARK)
+            } else if selected == Some(i) {
+                BAR.fg(ACCENT)
+            } else {
+                " ".into()
+            };
+            let flag = if cut.contains(&row.path.as_str()) {
                 "✂ ".fg(MARK)
             } else if copied.contains(&row.path.as_str()) {
                 "+ ".fg(MARK)
@@ -189,7 +202,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                 (false, _) if is_file => "▪ ".fg(FILE),
                 (false, _) => "• ".dim(),
             };
-            let mut spans = vec![flag, guide.dim(), icon];
+            let mut spans = vec![bar, flag, guide.dim(), icon];
             match renaming {
                 Some((path, input)) if path == row.path => {
                     spans.push(input.text.clone().underlined());
@@ -214,10 +227,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
             ListItem::new(Line::from(spans))
         })
         .collect();
-    let list = List::new(items)
-        .block(block)
-        .highlight_symbol(BAR.fg(ACCENT))
-        .scroll_padding(2);
+    let list = List::new(items).block(block).scroll_padding(2);
     f.render_stateful_widget(list, area, &mut app.list);
 
     if app.rows.len() > app.page {
@@ -398,7 +408,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
             vec!["none".dim()]
         } else {
             vec![
-                format!("● {} marked", app.marks.len()).fg(MARK).bold(),
+                format!("{BAR}{} marked", app.marks.len()).fg(MARK).bold(),
                 "   ".into(),
                 "x".fg(ACCENT).bold(),
                 " cut ".dim(),
@@ -551,6 +561,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
                 ("space", "mark"),
                 ("x y p", "cut/copy/paste"),
                 ("r", "rename"),
+                ("u", "undo"),
                 ("/", "filter"),
                 ("1-5", "recent"),
                 (":", "command"),
@@ -588,6 +599,81 @@ fn hint_fit(keys: &[(&str, &str)], width: usize) -> Line<'static> {
         n -= 1;
     }
     hint(&keys[keys.len() - 1..])
+}
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// A background pull/push: a spinner and git's latest output while it
+/// runs; on failure, git's output and the ways out.
+fn draw_sync(f: &mut Frame, sync: &Sync, upstream: Option<&str>) {
+    let upstream = upstream.unwrap_or("upstream").to_string();
+    let verb = sync.op.verb();
+    let shown = if sync.failed { 8 } else { 3 };
+    let tail = &sync.output[sync.output.len().saturating_sub(shown)..];
+
+    let mut lines: Vec<Line> = Vec::new();
+    let block = if sync.failed {
+        lines.push(Line::from(vec![
+            "✗ ".fg(DANGER).bold(),
+            format!("could not {verb} ").bold(),
+            match sync.op {
+                Op::Pull => "from ",
+                Op::Push => "to ",
+            }
+            .bold(),
+            upstream.fg(DANGER).bold(),
+        ]));
+        lines.push("".into());
+        lines.extend(tail.iter().map(|l| Line::from(l.clone().dim())));
+        let mut keys = match sync.op {
+            Op::Pull => hint(&[("r", "retry in terminal"), ("esc", "close")]),
+            Op::Push => hint(&[
+                ("r", "retry in terminal"),
+                ("q", "quit anyway"),
+                ("esc", "back"),
+            ]),
+        };
+        keys.spans.insert(0, " ".into());
+        keys.spans.push(" ".into());
+        popup(Line::from(format!(" git {verb} ")).bold(), DANGER).title_bottom(keys.right_aligned())
+    } else {
+        let elapsed = sync.started.elapsed();
+        let frame = (elapsed.as_millis() / 80) as usize % SPINNER.len();
+        lines.push(Line::from(vec![
+            SPINNER[frame].fg(ACCENT).bold(),
+            match sync.op {
+                Op::Pull => " pulling from ",
+                Op::Push => " pushing to ",
+            }
+            .into(),
+            upstream.bold(),
+            format!("  {}s", elapsed.as_secs()).dim(),
+        ]));
+        lines.push("".into());
+        // A steady height while output trickles in.
+        for i in 0..shown {
+            lines.push(match tail.get(i) {
+                Some(l) => Line::from(l.clone().dim()),
+                None => "".into(),
+            });
+        }
+        popup(Line::from(format!(" git {verb} ")).bold(), ACCENT)
+    };
+    let width = (f.area().width * 6 / 10).max(50);
+    // Long git errors wrap; size the popup for the wrapped text.
+    let text_width = width.saturating_sub(6).max(1) as usize;
+    let rows: usize = lines
+        .iter()
+        .map(|l| l.width().div_ceil(text_width).max(1))
+        .sum();
+    let area = popup_fixed(f.area(), width, rows as u16 + 4);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block.padding(Padding::new(2, 2, 1, 1))),
+        area,
+    );
 }
 
 fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
@@ -703,6 +789,7 @@ fn draw_help(f: &mut Frame) {
                 ("p", "paste into highlighted folder"),
                 ("r", "rename in place"),
                 ("d", "delete marked or highlighted"),
+                ("u  U", "undo / redo a change (this session)"),
                 ("esc", "clear filter, marks, then buffer"),
             ],
         ),

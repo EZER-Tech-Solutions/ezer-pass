@@ -7,5 +7,6 @@ edition = "2024"
 anyhow = "1"
 base64 = "0.22"
 colored = "3.1.1"
+libc = "0.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 rustyline = "17"

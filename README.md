@@ -32,7 +32,7 @@ Run `ezer-pass` with no arguments:
 ```
 ╭ ezer-pass  ──────────────────────────────────────────── ~/.password-store ╮
 │   ▾ servers/                                                              │
-│ ● ├─▸ prod/                                                               │
+│▌  ├─▸ prod/                                                               │
 │▌✂ ├─• web1                                                                │
 │   └─▪ tls-cert                                                            │
 │   ▸ personal/                                                             │
@@ -41,7 +41,7 @@ Run `ezer-pass` with no arguments:
 │ 1 /servers/web1       ▰▰▰▱▱ 32s ││ /servers/web1                          │
 │ 2 /apple/id                     ││ password · modified 3 days ago         │
 │                                 ││ buffer  ✂ cut web1   p paste           │
-│                                 ││ marks   ● 1 marked   x cut y copy d …  │
+│                                 ││ marks   ▌1 marked   x cut y copy d …   │
 │                                 ││ git     origin/master  ↑2 to push      │
 ╰─────────────────────────────────╯╰────────────────────────────────────────╯
 ⏎ copy/open  v view  space mark  x y p cut/copy/paste  r rename  / filter  ? help
@@ -65,6 +65,7 @@ of the highlighted row, the cut/copy buffer, marks, and git sync state.
 | `x` / `y` / `p` | cut / copy the marked (or highlighted) items, paste into the highlighted folder |
 | `r` | rename in place (`../x` and `/abs/path` move it) |
 | `d` | delete the marked (or highlighted) items, after asking |
+| `u` / `U` | undo / redo a change made in this session (`Ctrl-R` also redoes) |
 | `e` | edit in `$EDITOR` |
 | `g` `i` `m` `I` `E` | generate, insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | run any explore-mode command (`:git log`, `:find bank`, ...) |
@@ -145,6 +146,20 @@ explore session keep it synced automatically:
   resolve; a failed pull never blocks the session).
 - **On exit** — `q` in the TUI, `exit` or `Ctrl-D` in explore mode — if you have unpushed commits, it asks
   `push 2 commits to origin/master? [Y/n]` and pushes on yes.
+
+In the TUI, pulls and pushes run in the background behind a progress popup.
+git gets no terminal there, so an ssh passphrase or host-key prompt fails
+instead of drawing over the screen (an `SSH_ASKPASS` helper still works); the
+popup then shows git's output and `r` retries with the terminal handed over,
+where prompts work. A failed push on exit offers `q` to quit anyway (your
+commits stay local) or `esc` to go back.
+
+`u` in the TUI undoes the last change made in the session — a delete, move,
+rename, paste, edit, generate, insert or import — by reverting the commits pass
+made for it, as one new `Undo: …` commit; `U` redoes it the same way. Because
+undo adds a commit rather than rewriting history, it works after a push too.
+If later changes conflict with the undo, nothing is changed. Undo needs the
+store in git; `:git` commands themselves aren't undoable.
 
 Stores without git (or without a remote) are left completely alone, and one-shot
 commands never touch git.

@@ -1,4 +1,5 @@
 use super::fuzzy;
+use super::sync::{Op, Sync};
 use crate::commands::{self, COMMANDS, Session};
 use crate::{fileio, index, pass, repl, store};
 use anyhow::Result;
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 
 /// How many recently used entries the bottom pane keeps (and `1`-`5` copy).
 pub const RECENT_MAX: usize = 5;
+/// How many changes `u` can step back through.
+const UNDO_MAX: usize = 50;
 
 /// Work the event loop must do with the terminal in hand, because pass may
 /// need it (pinentry, $EDITOR, prompts) or print to it.
@@ -20,8 +23,11 @@ pub enum Effect {
     Copy(String),
     /// Run commands with the terminal handed back to them.
     Run(Batch),
+    /// `git pull` with the terminal handed over, so prompts (ssh
+    /// passphrase, host key) can be answered; normally pulls run in the
+    /// background behind a progress popup (`Mode::Sync`).
     Pull,
-    /// Push, then quit.
+    /// `git push` with the terminal handed over, then quit.
     Push,
 }
 
@@ -44,6 +50,20 @@ impl Batch {
             clear_buffer: false,
         }
     }
+}
+
+/// A change made in this session, as the commits pass made for it, so `u`
+/// can revert them (and `U` revert the revert).
+struct Change {
+    /// The commit before the change, and the last one it added.
+    base: String,
+    tip: String,
+    /// "move /a to /b", for messages and the revert commit.
+    label: String,
+    /// Renames it made, so marks and recents can follow them back.
+    moved: Vec<(String, String)>,
+    /// Store paths it touched, to highlight one afterwards.
+    paths: Vec<String>,
 }
 
 pub struct Job {
@@ -121,6 +141,8 @@ pub enum Mode {
     Confirm(Confirm),
     View(View),
     Help,
+    /// A background `git pull`/`push` and its progress popup.
+    Sync(Sync),
 }
 
 pub struct Status {
@@ -148,6 +170,10 @@ pub struct App {
     pub clip_time: Duration,
     /// Rows the tree shows at once, set by each draw; PgUp/PgDn move by it.
     pub page: usize,
+    /// Printed once the TUI has closed (e.g. a failed push).
+    pub exit_warning: Option<String>,
+    undo: Vec<Change>,
+    redo: Vec<Change>,
     history: Vec<String>,
     history_pos: Option<usize>,
 }
@@ -185,6 +211,9 @@ impl App {
             quit: false,
             clip_time: Duration::from_secs(clip_time),
             page: 10,
+            exit_warning: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             history: Vec::new(),
             history_pos: None,
         };
@@ -392,6 +421,29 @@ impl App {
         {
             view.revealed_at = None;
         }
+        if let Mode::Sync(sync) = &mut self.mode
+            && let Some(true) = sync.poll()
+        {
+            let op = sync.op;
+            // git's last line says what happened ("Already up to date.").
+            let summary = sync.output.last().cloned();
+            self.mode = Mode::Browse;
+            match op {
+                Op::Pull => {
+                    let what = match summary {
+                        Some(s) => format!("pulled — {}", s.trim()),
+                        None => "pulled".into(),
+                    };
+                    self.finish_sync(&what, Ok(()));
+                }
+                Op::Push => self.quit = true,
+            }
+        }
+    }
+
+    /// Whether something on screen is animating and wants frequent redraws.
+    pub fn busy(&self) -> bool {
+        matches!(&self.mode, Mode::Sync(s) if !s.failed)
     }
 
     /// Seconds until the clipboard clears, if the last copy is still live.
@@ -462,7 +514,15 @@ impl App {
         self.sess.files = index::FileIndex::load(self.sess.store.root());
     }
 
-    pub fn finish_run(&mut self, batch: &Batch, done: usize, result: Result<()>) {
+    /// `before` is the store's commit before the batch ran, if it is in git.
+    pub fn finish_run(
+        &mut self,
+        batch: &Batch,
+        done: usize,
+        result: Result<()>,
+        before: Option<String>,
+    ) {
+        self.record_change(batch, done, before);
         self.reload_files();
         for job in &batch.jobs[..done] {
             if let Some((from, to)) = &job.moved {
@@ -483,6 +543,106 @@ impl App {
         self.refresh_git();
         if let Err(e) = result {
             self.error(format!("{e:#}"));
+        }
+    }
+
+    /// Put what a batch committed on the undo stack. `:git` commands are
+    /// left out: their commits (a pull's, say) aren't ours to revert.
+    fn record_change(&mut self, batch: &Batch, done: usize, before: Option<String>) {
+        let jobs = &batch.jobs[..done];
+        let (Some(base), Some(first)) = (before, jobs.first()) else {
+            return;
+        };
+        if first.argv[0] == "git" {
+            return;
+        }
+        let Some(tip) = pass::git_head(self.sess.store.root()) else {
+            return;
+        };
+        if tip == base {
+            return;
+        }
+        self.undo.push(Change {
+            base,
+            tip,
+            label: describe(jobs),
+            moved: jobs.iter().filter_map(|j| j.moved.clone()).collect(),
+            paths: jobs.iter().flat_map(job_paths).collect(),
+        });
+        if self.undo.len() > UNDO_MAX {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// `u` (`redo` false) or `U`: revert the newest change on one stack as
+    /// a new commit, and put that commit on the other stack.
+    fn undo_step(&mut self, redo: bool) {
+        let (stack, verb, undone) = if redo {
+            (&mut self.redo, "Redo", "redid")
+        } else {
+            (&mut self.undo, "Undo", "undid")
+        };
+        let Some(change) = stack.pop() else {
+            let none = if !self.sess.store.root().join(".git").exists() {
+                "undo needs the store in git (`:git init`)"
+            } else if redo {
+                "nothing to redo"
+            } else {
+                "nothing to undo (only changes made in this session)"
+            };
+            return self.error(none);
+        };
+        let root = self.sess.store.root().to_path_buf();
+        let base = pass::git_head(&root);
+        let message = format!("{verb}: {}.", change.label);
+        if let Err(e) = pass::git_revert(&root, &change.base, &change.tip, &message) {
+            let label = change.label.clone();
+            if redo {
+                self.redo.push(change);
+            } else {
+                self.undo.push(change);
+            }
+            return self.error(format!("can't {} {label}: {e:#}", verb.to_lowercase()));
+        }
+        // Renames run backwards on undo and forwards again on redo.
+        if redo {
+            for (from, to) in &change.moved {
+                self.moved(from, to);
+            }
+        } else {
+            for (from, to) in change.moved.iter().rev() {
+                self.moved(to, from);
+            }
+        }
+        self.reload_files();
+        self.prune();
+        if let Some(f) = &mut self.filter {
+            f.index = self.sess.store.walk();
+        }
+        let focus = change
+            .paths
+            .iter()
+            .find(|p| self.sess.store.is_entry(p) || self.sess.store.is_dir(p))
+            .cloned();
+        match focus {
+            Some(p) => self.go_to(&p),
+            None => self.rebuild(None),
+        }
+        self.refresh_git();
+        let other = if redo { "u undoes" } else { "U redoes" };
+        self.info(format!("{undone} {} — {other}", change.label));
+        if let (Some(base), Some(tip)) = (base, pass::git_head(&root)) {
+            let back = Change {
+                base,
+                tip,
+                ..change
+            };
+            if redo {
+                self.undo.push(back);
+            } else {
+                self.redo.push(back);
+            }
         }
     }
 
@@ -514,6 +674,55 @@ impl App {
                 self.mode = Mode::Browse;
                 Effect::None
             }
+            Mode::Sync(_) => self.sync_key(key),
+        }
+    }
+
+    /// Keys for the git popup: ignored while git runs; once it has failed,
+    /// retry with the terminal handed over, or give up.
+    fn sync_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Sync(sync) = &self.mode else {
+            return Effect::None;
+        };
+        if !sync.failed {
+            return Effect::None;
+        }
+        let op = sync.op;
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        match (op, key.code) {
+            (_, KeyCode::Char('r') | KeyCode::Enter) => {
+                self.mode = Mode::Browse;
+                match op {
+                    Op::Pull => Effect::Pull,
+                    Op::Push => Effect::Push,
+                }
+            }
+            (Op::Pull, KeyCode::Esc | KeyCode::Char('q')) => {
+                self.mode = Mode::Browse;
+                self.finish_sync(
+                    "",
+                    Err(anyhow::anyhow!("pull failed (`:git pull` to retry)")),
+                );
+                Effect::None
+            }
+            (Op::Push, KeyCode::Char('q')) => {
+                self.exit_warning =
+                    Some("warning: git push failed — your commits are still local".into());
+                self.quit = true;
+                Effect::None
+            }
+            (Op::Push, KeyCode::Esc) => {
+                self.mode = Mode::Browse;
+                self.refresh_git();
+                self.error("not pushed — q to try again, or `:git push`");
+                Effect::None
+            }
+            _ if ctrl_c => {
+                self.mode = Mode::Browse;
+                Effect::None
+            }
+            _ => Effect::None,
         }
     }
 
@@ -605,6 +814,9 @@ impl App {
             KeyCode::Char('x') => self.fill_buffer(true),
             KeyCode::Char('y') => self.fill_buffer(false),
             KeyCode::Char('p') => return self.paste(),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.undo_step(true)
+            }
             KeyCode::Char('r') => {
                 if let Some((path, _, _)) = row {
                     let input = Input::new(basename(&path).to_string());
@@ -680,6 +892,8 @@ impl App {
                 self.info("refreshed");
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('u') => self.undo_step(false),
+            KeyCode::Char('U') => self.undo_step(true),
             _ => {}
         }
         Effect::None
@@ -1007,12 +1221,18 @@ impl App {
                 Effect::Run(Batch::new(jobs, Pause::OnError))
             }
             (Confirm::Overwrite { batch, .. }, true) => Effect::Run(batch),
-            (Confirm::Pull, true) => Effect::Pull,
+            (Confirm::Pull, true) => {
+                self.mode = Mode::Sync(Sync::start(Op::Pull, self.sess.store.root()));
+                Effect::None
+            }
             (Confirm::Pull, false) => {
                 self.info("not pulled (pull later with `:git pull`)");
                 Effect::None
             }
-            (Confirm::Push { .. }, true) => Effect::Push,
+            (Confirm::Push { .. }, true) => {
+                self.mode = Mode::Sync(Sync::start(Op::Push, self.sess.store.root()));
+                Effect::None
+            }
             (Confirm::Push { .. }, false) => {
                 self.quit = true;
                 Effect::None
@@ -1137,6 +1357,48 @@ fn tree_rows(
 }
 
 /// The folder holding a store path ("" for top-level items).
+/// What a batch did, for messages and revert commits: "move /a to /b",
+/// "delete 3 items".
+fn describe(jobs: &[Job]) -> String {
+    let cmd = jobs[0].argv[0].as_str();
+    let verb = match cmd {
+        "rm" => "delete",
+        "mv" => "move",
+        "cp" => "copy",
+        other => other,
+    };
+    if jobs.len() > 1 {
+        return format!("{verb} {} items", jobs.len());
+    }
+    let args: Vec<&str> = jobs[0].argv[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    match (cmd, args.as_slice()) {
+        ("mv" | "cp", [from, to, ..]) => format!("{verb} {from} to {to}"),
+        ("import", [.., entry]) => format!("import {entry}"),
+        (_, [path, ..]) => format!("{verb} {path}"),
+        _ => verb.to_string(),
+    }
+}
+
+/// Store paths a job may have touched, renames first.
+fn job_paths(job: &Job) -> Vec<String> {
+    let mut paths: Vec<String> = job
+        .moved
+        .iter()
+        .flat_map(|(from, to)| [from.clone(), to.clone()])
+        .collect();
+    paths.extend(
+        job.argv[1..]
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .map(|a| a.trim_start_matches('/').to_string()),
+    );
+    paths
+}
+
 pub fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(p, _)| p)
 }
@@ -1307,5 +1569,24 @@ mod tests {
         input.handle(key(KeyCode::Right));
         assert!(input.handle(ctrl('u')));
         assert_eq!(input.text, "v a");
+    }
+
+    #[test]
+    fn change_labels() {
+        let job = |argv: &[&str]| Job::new(argv.iter().map(|a| a.to_string()).collect());
+        assert_eq!(describe(&[job(&["rm", "-f", "-r", "/a/b"])]), "delete /a/b");
+        assert_eq!(
+            describe(&[job(&["mv", "-f", "/a", "/b/"])]),
+            "move /a to /b/"
+        );
+        assert_eq!(describe(&[job(&["generate", "/x", "20"])]), "generate /x");
+        assert_eq!(
+            describe(&[job(&["import", "f.pdf", "/docs/f"])]),
+            "import /docs/f"
+        );
+        assert_eq!(
+            describe(&[job(&["rm", "-f", "/a"]), job(&["rm", "-f", "/b"])]),
+            "delete 2 items"
+        );
     }
 }

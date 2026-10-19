@@ -254,6 +254,7 @@ dependencies = [
  "anyhow",
  "base64",
  "colored",
+ "libc",
  "ratatui",
  "rustyline",
 ]

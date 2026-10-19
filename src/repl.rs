@@ -174,7 +174,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
             // --ff-only so a diverged store fails cleanly instead of dropping
             // into an editor for a merge commit; sync failure must not block
             // the session.
-            if pass::run_interactive(&["git", "pull", "--ff-only"]).is_err() {
+            if pass::git_interactive(sess.store.root(), &["pull", "--ff-only"]).is_err() {
                 eprintln!(
                     "{}",
                     "warning: git pull failed — continuing unsynced (resolve with `git ...`)"
@@ -262,7 +262,7 @@ fn offer_push(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session, upstream
         if ahead == 1 { "" } else { "s" }
     );
     if confirm(rl, &prompt) {
-        if pass::run_interactive(&["git", "push"]).is_err() {
+        if pass::git_interactive(sess.store.root(), &["push"]).is_err() {
             eprintln!(
                 "{}",
                 "warning: git push failed — your commits are still local".yellow()

@@ -272,9 +272,14 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             if args.is_empty() {
                 bail!("usage: git <git-args>");
             }
-            let mut pass_args = vec!["git"];
-            pass_args.extend(args.iter().map(String::as_str));
-            pass::run_interactive(&pass_args)?
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            if args[0] == "init" {
+                let mut pass_args = vec!["git"];
+                pass_args.extend(args);
+                pass::run_interactive(&pass_args)?
+            } else {
+                pass::git_interactive(sess.store.root(), &args)?
+            }
         }
         "find" | "grep" => {
             if args.is_empty() {

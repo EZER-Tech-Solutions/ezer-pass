@@ -4,6 +4,7 @@
 
 mod app;
 mod fuzzy;
+mod sync;
 mod ui;
 
 use crate::commands::{self, Session};
@@ -24,19 +25,20 @@ pub fn run(sess: Session) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
-    if let Ok(Some(warning)) = &result {
+    if let Some(warning) = &app.exit_warning {
         eprintln!("{}", warning.yellow());
     }
-    result.map(|_| ())
+    result
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Option<String>> {
-    let mut exit_warning = None;
+fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     while !app.quit {
         app.tick();
         terminal.draw(|f| ui::draw(f, app))?;
-        // Wake periodically so a revealed password re-masks on time.
-        if !event::poll(Duration::from_millis(250))? {
+        // Wake periodically so a revealed password re-masks on time, and
+        // often while a spinner is turning.
+        let wait = if app.busy() { 80 } else { 250 };
+        if !event::poll(Duration::from_millis(wait))? {
             continue;
         }
         // Resize and other events just fall through to a redraw.
@@ -44,19 +46,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<Option<St
             && key.kind == KeyEventKind::Press
         {
             let effect = app.on_key(key);
-            exit_warning = perform(terminal, app, effect)?;
+            perform(terminal, app, effect)?;
         }
     }
-    Ok(exit_warning)
+    Ok(())
 }
 
-/// Carry out an effect. Returns a warning to print once the TUI has closed.
-fn perform(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-    effect: Effect,
-) -> Result<Option<String>> {
-    let mut exit_warning = None;
+/// Carry out an effect.
+fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Result<()> {
     match effect {
         Effect::None => {}
         Effect::Decrypt(path) => {
@@ -77,6 +74,7 @@ fn perform(
             app.finish_copy(&path, result);
         }
         Effect::Run(batch) => {
+            let before = pass::git_head(app.sess.store.root());
             let (done, result) = suspended(terminal, || {
                 let mut done = 0;
                 let mut result = Ok(());
@@ -94,25 +92,31 @@ fn perform(
                 }
                 (done, result)
             })?;
-            app.finish_run(&batch, done, result);
+            app.finish_run(&batch, done, result, before);
         }
         Effect::Pull => {
             let result = suspended(terminal, || {
-                pause_on_err(pass::run_interactive(&["git", "pull", "--ff-only"]))
+                pause_on_err(pass::git_interactive(
+                    app.sess.store.root(),
+                    sync::Op::Pull.args(),
+                ))
             })?;
             app.finish_sync("pulled", result);
         }
         Effect::Push => {
             let result = suspended(terminal, || {
-                pause_on_err(pass::run_interactive(&["git", "push"]))
+                pause_on_err(pass::git_interactive(
+                    app.sess.store.root(),
+                    sync::Op::Push.args(),
+                ))
             })?;
             if let Err(e) = result {
-                exit_warning = Some(format!("warning: {e:#} — your commits are still local"));
+                app.exit_warning = Some(format!("warning: {e:#} — your commits are still local"));
             }
             app.quit = true;
         }
     }
-    Ok(exit_warning)
+    Ok(())
 }
 
 /// Hand the terminal to `f` (pinentry, $EDITOR, pass prompts, command

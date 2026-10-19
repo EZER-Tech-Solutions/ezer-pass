@@ -3,7 +3,7 @@
 use super::app::Input;
 use crate::repl;
 
-/// The password types, as pass flags (charsets mapped in `commands`).
+/// The password types, as `generate` flags (charsets mapped in `commands`).
 pub const KINDS: &[(&str, Option<&str>)] = &[
     ("symbols", None),
     ("letters & digits", Some("-n")),
@@ -87,12 +87,9 @@ impl Form {
     }
 }
 
-/// The last type and length used, else "symbols" and pass's default length.
+/// The last type and length used, else "symbols" and the default length.
 fn load_prefs() -> (usize, u32) {
-    let default_length = std::env::var("PASSWORD_STORE_GENERATED_LENGTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(25);
+    let default_length = crate::commands::default_length();
     let saved = repl::state_file("generate").and_then(|p| std::fs::read_to_string(p).ok());
     let mut lines = saved.as_deref().unwrap_or("").lines();
     let kind = lines

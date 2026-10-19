@@ -4,7 +4,9 @@ use super::history::{self, History};
 use super::palette;
 use super::sync::{Op, Sync};
 use crate::commands::{self, COMMANDS, Session};
-use crate::{fileio, index, pass, repl, store};
+use crate::crypto::{self, WrongPassphrase};
+use crate::{clipboard, fileio, git, index, repl, store};
+use age::secrecy::SecretString;
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
@@ -14,14 +16,17 @@ use std::time::{Duration, Instant};
 /// How many recently used entries the bottom pane keeps (and `1`-`5` copy).
 pub const RECENT_MAX: usize = 5;
 
-/// Work the event loop must do with the terminal in hand, because pass may
-/// need it (pinentry, $EDITOR, prompts) or print to it.
+/// Work the event loop must do: decrypting (which may first need the
+/// identity unlocked), or anything with the terminal in hand ($EDITOR,
+/// prompts, output).
 pub enum Effect {
     None,
     /// Decrypt an entry into the view popup.
     Decrypt(String),
-    /// `pass show -c`: copy an entry's first line to the clipboard.
+    /// Copy an entry's first line to the clipboard.
     Copy(String),
+    /// Try the passphrase typed into the unlock popup.
+    Unlock,
     /// Run commands with the terminal handed back to them.
     Run(Batch),
     /// `git pull` with the terminal handed over, so prompts (ssh
@@ -37,6 +42,28 @@ pub enum Effect {
         length: u32,
         in_place: bool,
     },
+}
+
+impl Effect {
+    /// Whether it decrypts, and so needs the identity unlocked first.
+    fn needs_keys(&self) -> bool {
+        match self {
+            // A new password opens in the view popup afterwards, so ask
+            // before generating, not after.
+            Effect::Decrypt(_) | Effect::Copy(_) | Effect::Generate { .. } => true,
+            Effect::Run(batch) => batch.jobs.iter().any(|j| commands::needs_keys(&j.argv)),
+            _ => false,
+        }
+    }
+}
+
+/// Asking for the identity's passphrase, to then carry out `then`.
+pub struct Unlock {
+    pub input: Input,
+    pub error: Option<String>,
+    /// The passphrase is being tried (it takes about a second).
+    pub working: bool,
+    then: Box<Effect>,
 }
 
 /// Commands to run one after another, stopping at the first failure.
@@ -141,6 +168,8 @@ pub enum Mode {
     Sync(Sync),
     /// The store's git history (`u`).
     History(Box<History>),
+    /// Asking for the identity's passphrase.
+    Unlock(Unlock),
 }
 
 pub struct Status {
@@ -178,10 +207,7 @@ pub struct App {
 
 impl App {
     pub fn new(sess: Session) -> Self {
-        let clip_time = std::env::var("PASSWORD_STORE_CLIP_TIME")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(45);
+        let clip_time = clipboard::clear_after();
         let recent = repl::state_file("recent")
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|s| {
@@ -330,9 +356,9 @@ impl App {
     }
 
     pub fn refresh_git(&mut self) {
-        self.upstream = pass::git_upstream(self.sess.store.root());
+        self.upstream = git::upstream(self.sess.store.root());
         self.ahead = if self.upstream.is_some() {
-            pass::git_ahead_count(self.sess.store.root())
+            git::ahead_count(self.sess.store.root())
         } else {
             0
         };
@@ -388,7 +414,7 @@ impl App {
     }
 
     /// Persist recents so `1`-`5` work across sessions. Store paths only;
-    /// pass doesn't encrypt names either.
+    /// the store doesn't encrypt names either.
     fn save_recent(&self) {
         if let Some(path) = repl::state_file("recent") {
             let _ = std::fs::write(path, self.recent.join("\n") + "\n");
@@ -585,7 +611,7 @@ impl App {
             Err(_) => Secret::Text(content),
         };
         // Decrypting is the one moment the truth is known; fix the index
-        // if it was wrong (e.g. after a plain `pass mv`).
+        // if it was wrong (e.g. after a change made elsewhere).
         let size = match &secret {
             Secret::File { size, .. } => Some(*size as u64),
             Secret::Text(_) => None,
@@ -674,6 +700,89 @@ impl App {
             Mode::Generate(_) => self.generate_key(key),
             Mode::Sync(_) => self.sync_key(key),
             Mode::History(_) => self.history_key(key),
+            Mode::Unlock(_) => self.unlock_key(key),
+        }
+    }
+
+    /// Let `effect` through if it needs no keys or they are unlocked;
+    /// otherwise unlock first (a plain key file needs no passphrase) and
+    /// hold it until the passphrase is in.
+    pub fn gate(&mut self, effect: Effect) -> Effect {
+        if self.sess.keys.is_some() || !effect.needs_keys() {
+            return effect;
+        }
+        match crypto::needs_passphrase() {
+            Ok(true) => {
+                self.mode = Mode::Unlock(Unlock {
+                    input: Input::default(),
+                    error: None,
+                    working: false,
+                    then: Box::new(effect),
+                });
+                Effect::None
+            }
+            Ok(false) => match crypto::unlock(None) {
+                Ok(keys) => {
+                    self.sess.keys = Some(keys);
+                    effect
+                }
+                Err(e) => {
+                    self.error(format!("{e:#}"));
+                    Effect::None
+                }
+            },
+            Err(e) => {
+                self.error(format!("{e:#}"));
+                Effect::None
+            }
+        }
+    }
+
+    fn unlock_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Unlock(u) = &mut self.mode else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Browse,
+            KeyCode::Char('c') if ctrl => self.mode = Mode::Browse,
+            KeyCode::Enter if !u.input.text.is_empty() => {
+                u.working = true;
+                return Effect::Unlock;
+            }
+            _ => {
+                if u.input.handle(key) {
+                    u.error = None;
+                }
+            }
+        }
+        Effect::None
+    }
+
+    /// Try the typed passphrase: on success, carry on with what was held.
+    pub fn try_unlock(&mut self) -> Effect {
+        let Mode::Unlock(u) = &mut self.mode else {
+            return Effect::None;
+        };
+        let passphrase = SecretString::from(std::mem::take(&mut u.input).text);
+        match crypto::unlock(Some(&passphrase)) {
+            Ok(keys) => {
+                self.sess.keys = Some(keys);
+                let Mode::Unlock(u) = std::mem::replace(&mut self.mode, Mode::Browse) else {
+                    unreachable!()
+                };
+                *u.then
+            }
+            Err(e) if e.is::<WrongPassphrase>() => {
+                u.working = false;
+                u.error = Some("wrong passphrase".into());
+                Effect::None
+            }
+            Err(e) => {
+                self.mode = Mode::Browse;
+                self.error(format!("{e:#}"));
+                Effect::None
+            }
         }
     }
 
@@ -753,7 +862,7 @@ impl App {
         }
         let message = history::undo_message(&commit.subject);
         let touched = h.touched();
-        let result = pass::git_undo(self.sess.store.root(), &commit.hash, &message);
+        let result = git::undo(self.sess.store.root(), &commit.hash, &message);
         self.after_history_change(&message, touched, result);
     }
 
@@ -768,7 +877,7 @@ impl App {
         let message = format!("Roll back to \"{}\" ({}).", commit.subject, commit.short);
         // Everything newer may come back or go away; any of it will do.
         let touched: Vec<String> = h.touched();
-        let result = pass::git_restore(self.sess.store.root(), &commit.hash, &message);
+        let result = git::restore(self.sess.store.root(), &commit.hash, &message);
         self.after_history_change(&message, touched, result);
     }
 

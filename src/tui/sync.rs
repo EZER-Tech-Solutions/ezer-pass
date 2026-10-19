@@ -1,7 +1,7 @@
 //! `git pull`/`git push` in the background, so the TUI can show a progress
 //! popup instead of handing over the terminal.
 //!
-//! git runs detached from the terminal (`pass::detach`): an ssh passphrase
+//! git runs detached from the terminal (`git::detach`): an ssh passphrase
 //! or host-key prompt fails instead of drawing over the TUI, and the popup
 //! offers to retry with the terminal handed over, where prompts work.
 
@@ -110,7 +110,6 @@ impl Sync {
 }
 
 fn run(op: Op, store_root: &Path, tx: &Sender<Msg>) -> Result<(), String> {
-    // git itself rather than `pass git`, which exits 0 when git fails.
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(store_root)
@@ -120,7 +119,7 @@ fn run(op: Op, store_root: &Path, tx: &Sender<Msg>) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crate::pass::detach(&mut cmd)
+    let mut child = crate::git::detach(&mut cmd)
         .spawn()
         .map_err(|e| format!("failed to run `git`: {e}"))?;
     let readers: Vec<_> = [

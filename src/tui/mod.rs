@@ -11,7 +11,7 @@ mod sync;
 mod ui;
 
 use crate::commands::{self, Session};
-use crate::pass;
+use crate::{clipboard, fileio, git};
 use anyhow::Result;
 use app::{App, Effect, Pause};
 use colored::Colorize;
@@ -55,25 +55,33 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-/// Carry out an effect.
+/// Carry out an effect, once the identity is unlocked if it needs to be.
 fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Result<()> {
-    match effect {
+    match app.gate(effect) {
         Effect::None => {}
+        Effect::Unlock => {
+            // Show "unlocking" while the key is stretched (about a second).
+            terminal.draw(|f| ui::draw(f, app))?;
+            let next = app.try_unlock();
+            perform(terminal, app, next)?;
+        }
         Effect::Decrypt(path) => {
-            // Try without a passphrase prompt first: if gpg-agent has it
-            // cached the screen never flickers.
-            let result = match pass::capture_no_prompt(&["show", "--", &path]) {
-                Ok(content) => Ok(content),
-                Err(_) => suspended(terminal, || pause_on_err(pass::show(&path)))?,
-            };
+            let keys = app.sess.keys.as_ref().expect("gated");
+            let result = app
+                .sess
+                .store
+                .read_entry(&path, keys)
+                .map(|content| content.to_string());
             app.finish_decrypt(path, result);
         }
         Effect::Copy(path) => {
-            let args = ["show", "-c", "--", path.as_str()];
-            let result = match pass::run_no_prompt(&args) {
-                Ok(()) => Ok(()),
-                Err(_) => suspended(terminal, || pause_on_err(pass::run_interactive(&args)))?,
-            };
+            let keys = app.sess.keys.as_ref().expect("gated");
+            let result = app.sess.store.read_entry(&path, keys).and_then(|content| {
+                if fileio::marker_filename(&content).is_some() {
+                    anyhow::bail!("{} is a file entry", crate::store::display(&path));
+                }
+                clipboard::copy(content.lines().next().unwrap_or(""))
+            });
             app.finish_copy(&path, result);
         }
         Effect::Run(batch) => {
@@ -102,24 +110,14 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
             length,
             in_place,
         } => {
-            let quiet = commands::generate_to_clipboard(&path, kind, length, in_place, true);
-            // Only replacing in place decrypts the old entry, so only then
-            // can a failure be a passphrase prompt worth a retry. Retrying
-            // anything else could generate twice.
-            let result = match quiet {
-                Err(_) if in_place => suspended(terminal, || {
-                    pause_on_err(commands::generate_to_clipboard(
-                        &path, kind, length, in_place, false,
-                    ))
-                })?,
-                other => other,
-            };
+            let result = commands::generate(&mut app.sess, &path, kind, length as usize, in_place)
+                .and_then(|password| clipboard::copy(&password));
             let next = app.finish_generate(path, result);
             perform(terminal, app, next)?;
         }
         Effect::Pull => {
             let result = suspended(terminal, || {
-                pause_on_err(pass::git_interactive(
+                pause_on_err(git::interactive(
                     app.sess.store.root(),
                     sync::Op::Pull.args(),
                 ))
@@ -128,7 +126,7 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
         }
         Effect::Push => {
             let result = suspended(terminal, || {
-                pause_on_err(pass::git_interactive(
+                pause_on_err(git::interactive(
                     app.sess.store.root(),
                     sync::Op::Push.args(),
                 ))
@@ -142,10 +140,10 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
     Ok(())
 }
 
-/// Hand the terminal to `f` (pinentry, $EDITOR, pass prompts, command
-/// output) and take it back afterwards. Output stays on the alternate
-/// screen, so anything printed — `generate`'s new password included — is
-/// gone when the TUI redraws instead of lingering in shell scrollback.
+/// Hand the terminal to `f` ($EDITOR, prompts, command output) and take
+/// it back afterwards. Output stays on the alternate screen, so anything
+/// printed — `generate`'s new password included — is gone when the TUI
+/// redraws instead of lingering in shell scrollback.
 fn suspended<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> Result<T> {
     terminal.clear()?;
     terminal.show_cursor()?;
@@ -160,7 +158,7 @@ fn suspended<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> Result
     Ok(out)
 }
 
-/// On failure, print the error and hold the screen so gpg/git's own stderr
+/// On failure, print the error and hold the screen so git's own stderr
 /// can be read before the TUI comes back.
 fn pause_on_err<T>(result: Result<T>) -> Result<T> {
     if let Err(e) = &result {

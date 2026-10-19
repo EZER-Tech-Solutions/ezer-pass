@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+age = { version = "0.12.1", features = ["armor"] }
 anyhow = "1"
 base64 = "0.22"
 colored = "3.1.1"
+getrandom = "0.3"
 libc = "0.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
+rpassword = "7"
 rustyline = "17"
+zeroize = "1"

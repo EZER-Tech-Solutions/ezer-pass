@@ -1,5 +1,5 @@
 use crate::commands::{self, COMMANDS, Outcome, Session};
-use crate::{pass, store};
+use crate::{git, store};
 use colored::Colorize;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
@@ -170,13 +170,13 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
     );
 
     // If the store has an upstream, offer to pull any changes from it.
-    let upstream = pass::git_upstream(sess.store.root());
+    let upstream = git::upstream(sess.store.root());
     if let Some(upstream) = &upstream {
         if confirm(&mut rl, &format!("pull from {upstream}? [Y/n] ")) {
             // --ff-only so a diverged store fails cleanly instead of dropping
             // into an editor for a merge commit; sync failure must not block
             // the session.
-            if pass::git_interactive(sess.store.root(), &["pull", "--ff-only"]).is_err() {
+            if git::interactive(sess.store.root(), &["pull", "--ff-only"]).is_err() {
                 eprintln!(
                     "{}",
                     "warning: git pull failed — continuing unsynced (resolve with `git ...`)"
@@ -255,7 +255,7 @@ fn confirm(rl: &mut Editor<EzerHelper, FileHistory>, prompt: &str) -> bool {
 
 /// On exit, offer to push any local commits to the store's upstream.
 fn offer_push(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session, upstream: &str) {
-    let ahead = pass::git_ahead_count(sess.store.root());
+    let ahead = git::ahead_count(sess.store.root());
     if ahead == 0 {
         return;
     }
@@ -264,7 +264,7 @@ fn offer_push(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session, upstream
         if ahead == 1 { "" } else { "s" }
     );
     if confirm(rl, &prompt) {
-        if pass::git_interactive(sess.store.root(), &["push"]).is_err() {
+        if git::interactive(sess.store.root(), &["push"]).is_err() {
             eprintln!(
                 "{}",
                 "warning: git push failed — your commits are still local".yellow()

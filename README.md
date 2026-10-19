@@ -1,29 +1,35 @@
 # ezer-pass
 
-An interactive wrapper around [`pass`](https://www.passwordstore.org/), the standard
-unix password manager. It fixes the two things that make a deeply nested store
-painful: typing long entry paths, and storing anything that isn't text.
+A password manager for the terminal, in the spirit of
+[`pass`](https://www.passwordstore.org/): one encrypted file per entry, in a
+folder tree you can sync with git. Entries are encrypted with
+[age](https://age-encryption.org/) and decrypted in-process, so there is no gpg,
+no pinentry and no agent, and searching the whole store takes moments. It also
+fixes the two things that make a deeply nested store painful: typing long entry
+paths, and storing anything that isn't text.
 
 - **TUI** — a full-screen browser: a collapsible tree with fuzzy filtering,
   cut/copy/paste and in-place rename, a recent-entries pane for one-key copies,
   and every command one keystroke (or `:`) away.
 - **Explore mode** — a shell-like session that tracks a current directory inside
   your store: `cd servers`, `ls`, `show web1`, with tab completion and history.
-- **File entries** — import any file as a base64-encoded pass entry and export it
+- **File entries** — import any file as a base64-encoded entry and export it
   back out, with automatic detection on read.
 
-All secret handling stays in `pass` itself: ezer-pass shells out to the `pass`
-binary for every decrypt/encrypt, so GPG, pinentry, git integration, and the
-clipboard behave exactly as they do with plain `pass`. Only the directory *names*
-(which are not encrypted) are read directly from the store.
+Entry *contents* are encrypted; folder and entry *names* are not, just as with
+`pass`.
 
 ## Install
 
-Requires `pass` and a working password store (`pass init <gpg-id>`).
-
 ```sh
 cargo install --path .
+ezer-pass init        # makes your identity (asks for a passphrase) and the store
 ```
+
+Copying to the clipboard needs `wl-copy`/`wl-paste` (Wayland) or `xclip` (X11);
+sync and history need `git`.
+
+Coming from `pass`? See [Moving from pass](#moving-from-pass).
 
 ## TUI
 
@@ -57,7 +63,7 @@ highlighted row (password, file, folder), and while items are marked or cut.
 |---|---|
 | `j` `k` / arrows | move (`PgUp` `PgDn` `Home` `End`) |
 | `l` / `→`, `h` / `←` | expand / collapse a folder, step in / jump to parent |
-| `Enter` | copy the password (via `pass show -c`), export a file entry, or toggle a folder |
+| `Enter` | copy the password, export a file entry, or toggle a folder |
 | `H` / `Backspace` | collapse the folder the cursor is in, landing on it |
 | `-` | collapse everything |
 | `v` | view the entry in a popup; `space` reveals the password |
@@ -68,27 +74,26 @@ highlighted row (password, file, folder), and while items are marked or cut.
 | `r` | rename in place (`../x` and `/abs/path` move it) |
 | `d` | delete the marked (or highlighted) items, after asking |
 | `u` | history: undo any past change, or roll the store back to a point |
-| `e` | edit in `$EDITOR` |
+| `e` | edit in `$VISUAL` / `$EDITOR` |
 | `g` | generate a password in the highlighted folder: pick name, type (symbols, letters & digits, url-safe, hex, digits, base-64) and length; it goes straight to the clipboard and opens masked, never printed. Type and length are remembered; on an existing entry it replaces only the password line |
 | `i` `m` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
 | `Esc` | clear the filter, then marks, then the buffer |
 | `R` / `?` / `q` | refresh / help / quit |
 
-- Pasting moves with `pass mv` / copies with `pass cp`, so entries are
-  re-encrypted when they land under a different `.gpg-id` and every change is
-  a git commit. Overwriting an existing entry asks first; copying into the same
-  folder makes `name-copy`.
+- Pasting moves or copies, re-encrypting entries that land in a folder with
+  different recipients, and every change is a git commit. Overwriting an
+  existing entry asks first; copying into the same folder makes `name-copy`.
 - Passwords are never on screen unless you open `v` and press `space`; a
   revealed password re-masks after `PASSWORD_STORE_CLIP_TIME` (45 s), and the
   plaintext is dropped when the popup closes. The rest of the entry (`user:`,
   `url:`, notes) is shown in the popup.
 - Recent entries persist in `$XDG_STATE_HOME/ezer-pass/recent` (names only).
-- Decryption first runs with gpg's pinentry disabled, so when gpg-agent already
-  has your passphrase the screen never flickers. Otherwise the TUI steps aside
-  for pinentry, then comes straight back. The same hand-over happens for
-  `$EDITOR`, `pass insert` and command output; it all stays on the alternate
-  screen, so a freshly generated password doesn't linger in shell scrollback.
+- The first time something needs decrypting, an unlock popup asks for your
+  identity's passphrase; after that the session stays unlocked until you quit.
+- The TUI steps aside for `$EDITOR`, `insert` prompts and command output, then
+  comes straight back; it all stays on the alternate screen, so a freshly
+  generated password doesn't linger in shell scrollback.
 
 ## Explore mode
 
@@ -105,7 +110,8 @@ ezer:/servers > ls
 prod/
 web1
 ezer:/servers > show -c web1
-Copied servers/web1 to clipboard. Will clear in 45 seconds.
+passphrase for ~/.config/ezer-pass/identity.age:
+copied /servers/web1 to the clipboard; it clears in 45 seconds
 ezer:/servers > cd prod          # tab completion works: cd p<Tab>
 ezer:/servers/prod > show db
 hunter2
@@ -114,6 +120,8 @@ hunter2
 - Paths are relative to the current directory; `..`, `.` and store-absolute
   `/apple/id` work like a shell, and `..` can never escape the store.
 - Typing a bare directory name (`servers`) is shorthand for `cd servers`.
+- The passphrase is asked once per session, the first time something is
+  decrypted.
 - `Ctrl-D` or `exit` leaves; command history is kept in
   `~/.local/state/ezer-pass/history` (commands only, never secrets).
 
@@ -123,22 +131,68 @@ hunter2
 |---|---|
 | `ls [path]` | list a store directory |
 | `cd [path]` / `pwd` | move around the store |
-| `mkdir <path>` | create a directory (pass has none; git tracks it once it holds an entry) |
-| `show [-c] <entry>` | print an entry, or `-c` to copy via pass |
-| `insert [-m] [-e] <entry>` | add an entry (interactive) |
-| `generate [-n] <entry> [len]` | generate a password |
-| `edit <entry>` | edit in `$EDITOR` |
-| `rm [-r] <path>` | remove an entry or directory |
-| `mv <src> <dest>` / `cp <src> <dest>` | rename or copy |
-| `find <terms>` / `grep <pattern>` | search names / decrypted contents |
+| `mkdir <path>` | create a directory (git tracks it once it holds an entry) |
+| `show [-c] <entry>` | print an entry, or `-c` to copy its first line (cleared after 45 s) |
+| `insert [-m] [-e] [-f] <entry>` | add an entry: asks twice without echo; `-m` several lines, `-e` echo |
+| `generate [-n] [-c] [-i] [-f] [--url-safe\|--hex\|--digits\|--base-64] <entry> [len]` | generate a password; `-c` copies instead of printing, `-i` replaces only the first line |
+| `edit <entry>` | edit in `$VISUAL` / `$EDITOR`, via a private file in `/dev/shm` that is wiped afterwards |
+| `rm [-r] [-f] <path>` | remove an entry or directory |
+| `mv [-f] <src> <dest>` / `cp [-f] <src> <dest>` | rename or copy, re-encrypting for the new folder's recipients if they differ |
+| `find <terms>` | list entries whose names contain any term |
+| `grep [-i] <text>` | search inside entries (ignores case unless `text` has capitals) |
 | `import [--force] <file> <entry>` | store a file as a base64 entry |
 | `export [-f] <entry> [dest]` | write a file entry back to disk |
 | `reindex [path]` | find file entries the index doesn't know about (older stores) |
-| `git <git-args>` | run git in the store (`git log`, `git remote add`, ...) |
+| `init [-p folder] [age1...]` | make your identity if needed; set who a folder is encrypted to |
+| `migrate` | move a `pass` store from gpg to age, once |
+| `git <git-args>` | run git in the store (`git init`, `git log`, `git remote add`, ...) |
 
 Every command also works one-shot from your shell with the same syntax:
 `ezer-pass show servers/web1`, `ezer-pass import cert.pem servers/cert`.
-Anything not listed (otp, init, ...) is out of scope — use plain `pass`.
+
+## Keys and encryption
+
+Each entry is an age file (`name.age`) encrypted to the *recipients* (age public
+keys) listed in the nearest `.age-recipients`: the one in its folder, or the
+closest one above it. Your *identity*, the private key that decrypts them, lives
+in `~/.config/ezer-pass/identity.age`, encrypted with your passphrase.
+
+- `ezer-pass init` makes the identity (asking for a passphrase twice) and writes
+  the store's `.age-recipients` with your public key.
+- `init -p team age1… age1…` gives a folder its own recipients, for sharing
+  with others, and re-encrypts what is already there. Entries moved or copied
+  into it are re-encrypted for them too.
+- The passphrase is asked once per TUI or explore session and the unlocked key
+  is kept in memory only. A plain, unencrypted identity file (as made by
+  `age-keygen`) also works and is never asked about.
+- Back the identity up: without it and its passphrase nothing in the store can
+  be read. To use the store on another machine, copy the identity there and
+  clone the store.
+- The files are standard age, so the `age` command line reads them too:
+  `age -d -i ~/.config/ezer-pass/identity.age ~/.password-store/site.age`.
+
+## Moving from pass
+
+ezer-pass reads a store made by `pass` only to move it to age:
+
+```
+$ ezer-pass migrate
+no identity yet; making one at ~/.config/ezer-pass/identity.age
+passphrase for your new identity:
+the same passphrase again:
+your public key is age1rn2pkl4k7y6ejkqp43q8asvsssjkxlw72ej9l9xvr9aylnzv64xshgkcr3
+decrypting 214 entries with gpg (it may ask for your gpg passphrase once)
+moved 214 entries to age
+```
+
+It decrypts every entry with gpg one last time, encrypts it with age, removes
+the `.gpg` files and `.gpg-id`, and commits the whole move as one change. If any
+entry fails to decrypt, nothing is touched. Until a store is migrated, ezer-pass
+refuses to work on it, other than `migrate` and `git`.
+
+Afterwards history still shows every commit from before the move, but undoing
+one of those, or rolling back past the move, is refused, since it would bring
+back gpg files. On your other machines, copy the identity over and pull.
 
 ## Git sync
 
@@ -163,7 +217,7 @@ commands never touch git.
 
 ## History and undo
 
-Every change pass makes is a git commit, so `u` in the TUI opens the store's
+Every change is a git commit, so `u` in the TUI opens the store's
 history — from any session or machine, not just this one — with a graph of
 how it branched and merged across machines:
 
@@ -206,9 +260,8 @@ ezer:/ > export apple/backup-codes ~/Desktop/
 exported /apple/backup-codes (48213 bytes) to /home/you/Desktop/backup-codes.pdf
 ```
 
-A file entry is a normal pass entry whose first line is a marker, followed by the
-base64-encoded file — so it stays fully readable by plain `pass` and syncs like
-any other entry:
+A file entry is a normal entry whose first line is a marker, followed by the
+base64-encoded file, so it syncs like any other entry:
 
 ```
 !ezer-pass:b64:backup-codes.pdf
@@ -223,15 +276,14 @@ password without decrypting it. Instead it keeps `.files` in the store root — 
 git-tracked list of file-entry paths and sizes — so the TUI and `ls` can show
 files in their own color without a single decrypt. ezer-pass updates it on
 `import`, `mv`, `cp`, `rm` and paste, and corrects it whenever an entry is
-decrypted, so changes made with plain `pass` heal the next time you view the
+decrypted, so changes made with other tools heal the next time you view the
 entry. It reveals only *that* an entry is a file; the names are already
 unencrypted.
 
-For an older store — files imported before the index existed, or with plain
-`pass` on another machine — run `reindex` (`:reindex` in the TUI, or
-`ezer-pass reindex`) once. It decrypts every entry (or just those under
-`reindex <folder>`) without printing anything, records which are files, and
-commits the updated index. You're asked for your passphrase at most once.
+For an older store, with files imported before the index existed or by another
+tool, run `reindex` (`:reindex` in the TUI, or `ezer-pass reindex`) once. It
+decrypts every entry (or just those under `reindex <folder>`) without printing
+anything, records which are files, and commits the updated index.
 
 In the TUI, file entries are magenta with a `▪`; the info pane shows their size,
 and `Enter` (or `E`) opens `:export <entry> ` — add a destination, or press
@@ -244,7 +296,10 @@ refused without `--force` — a password store is a poor home for large blobs.
 | Variable | Effect |
 |---|---|
 | `PASSWORD_STORE_DIR` | store location (default `~/.password-store`), same as pass |
-| `PASSWORD_STORE_CLIP_TIME` | seconds before a revealed password re-masks in the TUI (default 45) and the recent-pane countdown, same as pass's clipboard timeout |
+| `EZER_PASS_IDENTITY` | identity file (default `$XDG_CONFIG_HOME/ezer-pass/identity.age`) |
+| `PASSWORD_STORE_CLIP_TIME` | seconds a copied password stays on the clipboard, and before a revealed one re-masks in the TUI (default 45) |
+| `PASSWORD_STORE_GENERATED_LENGTH` | default length for `generate` (default 25) |
+| `VISUAL` / `EDITOR` | editor for `edit` (default `vi`) |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |
 | `EZER_PASS_ICONS` | `plain` draws folders as `▶`/`▼` instead of Nerd Font folder icons, for fonts without them |
 
@@ -254,12 +309,11 @@ refused without `--force` — a password store is a poor home for large blobs.
 cargo test
 ```
 
-To try it against a throwaway store instead of your real one:
+To try it against a throwaway store and identity instead of your real ones:
 
 ```sh
-export GNUPGHOME=$(mktemp -d) && chmod 700 "$GNUPGHOME"
-gpg --batch --passphrase '' --quick-gen-key test@ezer default default never
-export PASSWORD_STORE_DIR=$(mktemp -d) && pass init test@ezer
-pass generate -n servers/web1 20
+export PASSWORD_STORE_DIR=$(mktemp -d) XDG_CONFIG_HOME=$(mktemp -d)
+cargo run -- init
+cargo run -- generate -n servers/web1 20
 cargo run
 ```

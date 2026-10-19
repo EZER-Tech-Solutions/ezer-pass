@@ -34,7 +34,7 @@ impl Spec {
 pub const SPECS: &[Spec] = &[
     spec(
         "generate",
-        "[-n] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
+        "[-n] [-i] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
         "generate a password",
         Arg::Path,
     ),
@@ -71,13 +71,14 @@ pub const SPECS: &[Spec] = &[
         Arg::Dir,
     ),
     spec("find", "<terms>", "search entry names", Arg::None),
+    spec("grep", "[-i] <text>", "search inside entries", Arg::None),
+    spec("git", "<git-args>", "run git in the store", Arg::None),
     spec(
-        "grep",
-        "<pattern>",
-        "search inside decrypted entries",
+        "init",
+        "[-p folder] [age1...]",
+        "set who a folder is encrypted to",
         Arg::None,
     ),
-    spec("git", "<git-args>", "run git in the store", Arg::None),
     spec("pwd", "", "show the current folder", Arg::None),
     spec("help", "", "list the keys", Arg::None),
     spec("quit", "", "leave (offers to push)", Arg::None),

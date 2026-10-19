@@ -1,9 +1,10 @@
 //! The `u` history view: the store's git log, what each commit changed,
-//! and undoing a commit or rolling the store back to one. Every pass
-//! operation is a commit, so this reaches changes from any session or
+//! and undoing a commit or rolling the store back to one. Every change
+//! to the store is a commit, so this reaches changes from any session or
 //! machine, not just this one.
 
-use crate::pass::{self, Commit, FileChange};
+use crate::git::{self, Commit, FileChange};
+use crate::store::EXT;
 use anyhow::Result;
 use ratatui::widgets::ListState;
 use std::collections::HashSet;
@@ -46,7 +47,7 @@ impl History {
     /// Re-read the log, highlighting the newest commit.
     pub fn reload(&mut self, root: &Path) -> Result<()> {
         self.commits.clear();
-        for commit in pass::git_log(root, LIMIT)? {
+        for commit in git::log(root, LIMIT)? {
             // Dropping a row leaves the graph's lanes lined up above and
             // below it; only its connector lines need keeping.
             if commit.subject == INDEX_SUBJECT {
@@ -57,7 +58,7 @@ impl History {
             }
             self.commits.push(commit);
         }
-        self.unpushed = pass::git_unpushed(root);
+        self.unpushed = git::unpushed(root);
         self.select(0, root);
         Ok(())
     }
@@ -79,10 +80,10 @@ impl History {
         }
         let index = index.min(self.commits.len() - 1);
         self.list.select(Some(index));
-        self.changes = pass::git_changes(root, &self.commits[index]).unwrap_or_default();
+        self.changes = git::changes(root, &self.commits[index]).unwrap_or_default();
     }
 
-    /// The store paths (".gpg" dropped) the highlighted commit touched.
+    /// The store paths (".age" dropped) the highlighted commit touched.
     pub fn touched(&self) -> Vec<String> {
         self.changes
             .iter()
@@ -92,10 +93,13 @@ impl History {
     }
 }
 
-/// The store path of a file in the repo, or `None` for pass's own files
-/// (`.gpg-id`, `.gitattributes`, the file index).
+/// The store path of a file in the repo (an entry from before the move to
+/// age too), or `None` for the store's own files (`.age-recipients`, the
+/// file index).
 pub fn store_path(file: &str) -> Option<String> {
-    file.strip_suffix(".gpg").map(str::to_string)
+    file.strip_suffix(EXT)
+        .or_else(|| file.strip_suffix(".gpg"))
+        .map(str::to_string)
 }
 
 /// The message for undoing a commit: undoing an undo is a redo, and back.
@@ -124,8 +128,9 @@ mod tests {
 
     #[test]
     fn store_paths() {
+        assert_eq!(store_path("a/b.age").as_deref(), Some("a/b"));
         assert_eq!(store_path("a/b.gpg").as_deref(), Some("a/b"));
-        assert_eq!(store_path(".gpg-id"), None);
+        assert_eq!(store_path(".age-recipients"), None);
         assert_eq!(store_path(".files"), None);
     }
 }

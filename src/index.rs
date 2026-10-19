@@ -3,7 +3,7 @@
 //! store root as `.files` (git-tracked, so it syncs with the store) listing each file
 //! entry's path and decoded size. It is updated by ezer-pass's own imports,
 //! moves, copies and deletes, and corrected whenever an entry is decrypted,
-//! so changes made with plain `pass` heal the next time the entry is viewed.
+//! so changes made with other tools heal the next time the entry is viewed.
 //! It reveals only *that* an entry is a file — names are already unencrypted.
 
 use std::collections::BTreeMap;
@@ -67,7 +67,7 @@ impl FileIndex {
         self.dirty |= self.files.len() != before;
     }
 
-    /// Follow a `pass mv` (`keep_source = false`) or `pass cp` of an entry
+    /// Follow an `mv` (`keep_source = false`) or `cp` of an entry
     /// or directory.
     pub fn transfer(&mut self, from: &str, to: &str, keep_source: bool) {
         let moved: Vec<(String, u64)> = self
@@ -86,8 +86,8 @@ impl FileIndex {
         }
     }
 
-    /// Drop paths that are no longer entries (removed or moved by plain
-    /// `pass`, or by another machine).
+    /// Drop paths that are no longer entries (removed or moved by another
+    /// tool, or on another machine).
     pub fn prune(&mut self, is_entry: impl Fn(&str) -> bool) {
         let before = self.files.len();
         self.files.retain(|p, _| is_entry(p));
@@ -96,7 +96,7 @@ impl FileIndex {
 
     /// Write the index back if it changed and commit it when the store is
     /// a git repo. Best effort: a failed commit leaves the file staged, so
-    /// pass's next commit picks it up. Git runs with no stdio, so it can't
+    /// a later commit picks it up. Git runs with no stdio, so it can't
     /// disturb the TUI.
     pub fn save(&mut self, store_root: &Path) {
         if !self.dirty {

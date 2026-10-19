@@ -1,4 +1,4 @@
-use super::app::{App, Confirm, Mode, Row, Secret, basename};
+use super::app::{App, Confirm, Mode, Row, Secret, Unlock, basename};
 use super::generate::{self, Field, Form};
 use super::history;
 use super::palette;
@@ -54,7 +54,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if matches!(
         app.mode,
-        Mode::Confirm(_) | Mode::View(_) | Mode::Help | Mode::Sync(_) | Mode::Generate(_)
+        Mode::Confirm(_)
+            | Mode::View(_)
+            | Mode::Help
+            | Mode::Sync(_)
+            | Mode::Generate(_)
+            | Mode::Unlock(_)
     ) {
         // Push everything behind a popup into the background.
         let area = f.area();
@@ -70,7 +75,41 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_palette(f, footer, &palette, app.palette_sel);
         }
         Mode::Sync(sync) => draw_sync(f, sync, app.upstream.as_deref()),
+        Mode::Unlock(u) => draw_unlock(f, u),
         _ => {}
+    }
+}
+
+/// The passphrase popup: one masked field, then the held action runs.
+fn draw_unlock(f: &mut Frame, u: &Unlock) {
+    let dots = "•".repeat(u.input.text.chars().count());
+    let status = match (&u.error, u.working) {
+        (_, true) => Line::from("unlocking…".fg(ACCENT)),
+        (Some(e), _) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
+        (None, _) => "once per session; kept in memory only".dim().into(),
+    };
+    let lines = vec![
+        Line::from(vec![
+            BAR.fg(ACCENT),
+            "passphrase ".fg(ACCENT).bold(),
+            dots.clone().bold(),
+        ]),
+        "".into(),
+        status,
+    ];
+    let mut keys = hint(&[("⏎", "unlock"), ("esc", "cancel")]);
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let block = popup(Line::from(" unlock ").bold(), ACCENT)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(1, 2, 1, 1));
+    let area = popup_fixed(f.area(), 56.min(f.area().width), lines.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    let inner = block.inner(area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
+    if !u.working {
+        let x = inner.x + 1 + 11 + dots.chars().count() as u16;
+        f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
     }
 }
 

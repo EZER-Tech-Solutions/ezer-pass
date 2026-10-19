@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 /// `!ezer-pass:b64:<original-basename>`
 pub const MARKER_PREFIX: &str = "!ezer-pass:b64:";
 
-/// Files above this size are refused unless the user passes --force; GPG and
+/// Files above this size are refused unless the user passes --force; age and
 /// git cope with more, but a password store is a poor home for big blobs.
 pub const SIZE_LIMIT: u64 = 1024 * 1024;
 

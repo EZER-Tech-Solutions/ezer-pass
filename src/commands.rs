@@ -1,12 +1,16 @@
-use crate::{fileio, index, pass, store};
+use crate::crypto::{self, Keys};
+use crate::store::{self, EXT};
+use crate::{clipboard, fileio, git, index, setup};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
-use std::path::Path;
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// Every command `run` understands, for completion and the TUI's command line.
 pub const COMMANDS: &[&str] = &[
     "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "reindex", "generate",
-    "edit", "rm", "mv", "cp", "find", "grep", "git", "help", "exit", "quit",
+    "edit", "rm", "mv", "cp", "find", "grep", "git", "init", "migrate", "help", "exit", "quit",
 ];
 
 pub struct Session {
@@ -16,6 +20,8 @@ pub struct Session {
     pub interactive: bool,
     /// Which entries are file entries; see `index`.
     pub files: index::FileIndex,
+    /// The identity, once unlocked; kept for the rest of the session.
+    pub keys: Option<Keys>,
 }
 
 pub enum Outcome {
@@ -32,7 +38,36 @@ impl Session {
             cwd: String::new(),
             interactive,
             files,
+            keys: None,
         }
+    }
+
+    /// Unlock the identity if it isn't yet, asking for its passphrase on
+    /// the terminal.
+    pub fn unlock(&mut self) -> Result<&Keys> {
+        if self.keys.is_none() {
+            self.keys = Some(setup::unlock_on_terminal()?);
+        }
+        Ok(self.keys.as_ref().expect("just unlocked"))
+    }
+
+    /// Decrypt an entry, unlocking first if needed.
+    pub fn read(&mut self, path: &str) -> Result<Zeroizing<String>> {
+        self.unlock()?;
+        let keys = self.keys.as_ref().expect("unlocked");
+        self.store.read_entry(path, keys)
+    }
+
+    /// Encrypt and write an entry, then commit it.
+    pub fn save(&mut self, path: &str, content: &[u8], message: &str) -> Result<()> {
+        self.store.write_entry(path, content)?;
+        self.commit(&[&entry_file(path)], message)
+    }
+
+    /// Commit a change to `paths` (store-relative), if the store is in git.
+    pub fn commit(&self, paths: &[&str], message: &str) -> Result<()> {
+        git::commit(self.store.root(), paths, message)
+            .context("the change is saved, but committing it to git failed")
     }
 
     pub fn resolve(&self, input: &str) -> String {
@@ -126,6 +161,30 @@ fn expect_args(positional: &[&str], usage: &str, min: usize, max: usize) -> Resu
     Ok(())
 }
 
+/// An entry's file, relative to the store root.
+fn entry_file(path: &str) -> String {
+    format!("{path}{EXT}")
+}
+
+/// Ask a yes/no question on the terminal; anything but y/yes is no.
+fn confirm(question: &str) -> Result<bool> {
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+/// Whether running `argv` will decrypt something, so the TUI can unlock
+/// the identity before handing the terminal over.
+pub fn needs_keys(argv: &[String]) -> bool {
+    match argv.first().map(String::as_str) {
+        Some("show" | "edit" | "export" | "grep" | "reindex") => true,
+        Some("generate") => argv.iter().any(|a| a == "-i" || a == "--in-place"),
+        _ => false,
+    }
+}
+
 /// Run a command in the given session, returning an Outcome indicating whether to continue or exit.
 pub fn run(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
     let result = dispatch(sess, argv);
@@ -191,78 +250,31 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n] [-c] [-f] [--url-safe|--hex|--digits|--base-64] <entry> [length]",
+                "generate [-n] [-c] [-f] [-i] [--url-safe|--hex|--digits|--base-64] <entry> [length]",
                 1,
                 2,
             )?;
-            let path = sess.resolve(positional[0]);
-            let charset_flags: Vec<&&str> = flags
-                .iter()
-                .filter(|f| matches!(**f, "--url-safe" | "--hex" | "--digits" | "--base-64"))
-                .collect();
-            if charset_flags.len() > 1 {
-                bail!("only one of --url-safe, --hex, --digits, --base-64 may be given");
-            }
-            let charset = charset_flags.first().and_then(|f| charset(f));
-            if charset.is_some() && flags.iter().any(|f| *f == "-n" || *f == "--no-symbols") {
-                bail!(
-                    "-n/--no-symbols overrides --url-safe/--hex/--digits/--base-64 in pass; drop one"
-                );
-            }
-            let mut pass_args = vec!["generate"];
-            pass_args.extend(flags.iter().filter(|f| !charset_flags.contains(f)));
-            pass_args.push("--");
-            pass_args.push(&path);
-            pass_args.extend(positional.get(1));
-            match charset {
-                Some(set) => {
-                    pass::run_interactive_env(&pass_args, &[("PASSWORD_STORE_CHARACTER_SET", set)])?
-                }
-                None => pass::run_interactive(&pass_args)?,
-            }
-            // Whatever was there, it now starts with a password.
-            sess.files.remove(&path);
+            cmd_generate(sess, &flags, &positional)?
         }
         "edit" => {
             expect_args(&positional, "edit <entry>", 1, 1)?;
-            let path = sess.resolve(positional[0]);
-            // pass's cmd_edit takes no options and rejects a `--` separator.
-            pass::run_interactive(&["edit", &path])?
+            cmd_edit(sess, positional[0])?
         }
         "rm" => {
             expect_args(&positional, "rm [-r] [-f] <path>", 1, 1)?;
             let path = sess.resolve(positional[0]);
-            let mut pass_args = vec!["rm"];
-            pass_args.extend(&flags);
-            pass_args.push("--");
-            pass_args.push(&path);
-            pass::run_interactive(&pass_args)?;
-            // Only forget what is really gone (e.g. not a refused `rm -r`
-            // of a directory that pass left in place).
+            let recursive = flags.iter().any(|f| matches!(*f, "-r" | "--recursive"));
+            let force = flags.iter().any(|f| matches!(*f, "-f" | "--force"));
+            cmd_rm(sess, &path, recursive, force)?;
             if !sess.store.is_entry(&path) && !sess.store.is_dir(&path) {
                 sess.files.remove(&path);
             }
         }
         "mv" | "cp" => {
             expect_args(&positional, "mv|cp [-f] <src> <dest>", 2, 2)?;
+            let force = flags.iter().any(|f| matches!(*f, "-f" | "--force"));
             let src = sess.resolve(positional[0]);
-            let dest = sess.resolve(positional[1]);
-            // Where pass will actually put it: into `dest` if that is an
-            // existing directory (or written with a trailing slash).
-            let landed = if sess.store.is_dir(&dest) || positional[1].ends_with('/') {
-                let name = src.rsplit('/').next().unwrap_or(&src);
-                store::resolve(&dest, name)
-            } else {
-                dest.clone()
-            };
-            let mut pass_args = vec![cmd];
-            pass_args.extend(&flags);
-            pass_args.push("--");
-            pass_args.push(&src);
-            pass_args.push(&dest);
-            pass::run_interactive(&pass_args)?;
-            let moved = cmd == "cp" || !(sess.store.is_entry(&src) || sess.store.is_dir(&src));
-            if moved {
+            if let Some(landed) = cmd_move(sess, cmd == "cp", &src, positional[1], force)? {
                 sess.files.transfer(&src, &landed, cmd == "cp");
             }
         }
@@ -271,21 +283,28 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
                 bail!("usage: git <git-args>");
             }
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            if args[0] == "init" {
-                let mut pass_args = vec!["git"];
-                pass_args.extend(args);
-                pass::run_interactive(&pass_args)?
+            if args == ["init"] {
+                git::init(sess.store.root())?;
+                println!("the store is now a git repo; every change will be a commit");
             } else {
-                pass::git_interactive(sess.store.root(), &args)?
+                git::interactive(sess.store.root(), &args)?
             }
         }
-        "find" | "grep" => {
-            if args.is_empty() {
-                bail!("usage: {cmd} <search-terms>");
+        "find" => {
+            if positional.is_empty() {
+                bail!("usage: find <terms>");
             }
-            let mut pass_args = vec![cmd];
-            pass_args.extend(args.iter().map(String::as_str));
-            pass::run_interactive(&pass_args)?
+            cmd_find(sess, &positional)
+        }
+        "grep" => {
+            expect_args(&positional, "grep [-i] <text>", 1, 1)?;
+            let ignore_case = flags.iter().any(|f| matches!(*f, "-i" | "--ignore-case"));
+            cmd_grep(sess, positional[0], ignore_case)?
+        }
+        "init" => setup::init(sess, args)?,
+        "migrate" => {
+            expect_args(&positional, "migrate", 0, 0)?;
+            setup::migrate(sess)?
         }
         "help" | "?" => print_help(),
         "exit" | "quit" if sess.interactive => return Ok(Outcome::Exit),
@@ -293,7 +312,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         _ if sess.interactive && args.is_empty() && sess.store.is_dir(&sess.resolve(cmd)) => {
             sess.cwd = sess.resolve(cmd);
         }
-        _ => bail!("unknown command {cmd:?} (try `help`; for anything else use plain `pass`)"),
+        _ => bail!("unknown command {cmd:?} (try `help`)"),
     }
     Ok(Outcome::Continue)
 }
@@ -326,11 +345,19 @@ fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
 /// Show the contents of a store entry, optionally copying it to the clipboard.
 fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
     let path = sess.resolve_entry(arg)?;
+    let content = sess.read(&path)?;
     if clip {
-        // pass prints its own "Copied ... to clipboard" and handles clearing.
-        return pass::run_interactive(&["show", "-c", "--", &path]);
+        if fileio::marker_filename(&content).is_some() {
+            bail!("{} is a file entry (use `export`)", store::display(&path));
+        }
+        clipboard::copy(content.lines().next().unwrap_or(""))?;
+        println!(
+            "copied {} to the clipboard; it clears in {} seconds",
+            store::display(&path).green(),
+            clipboard::clear_after()
+        );
+        return Ok(());
     }
-    let content = pass::show(&path)?;
     if fileio::marker_filename(&content).is_some() {
         let entry = fileio::decode_payload(&content)?;
         sess.files.insert(&path, entry.data.len() as u64);
@@ -343,59 +370,519 @@ fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
         );
     } else {
         sess.files.remove(&path);
-        print!("{content}");
+        print!("{}", *content);
     }
     Ok(())
 }
 
-/// The character set pass should draw from for one of ezer-pass's
-/// generate flags.
-fn charset(flag: &str) -> Option<&'static str> {
-    match flag {
-        "--url-safe" => Some("A-Za-z0-9_-"),
-        "--hex" => Some("0-9a-f"),
-        "--digits" => Some("0-9"),
-        "--base-64" => Some("A-Za-z0-9+/"),
-        _ => None,
+const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// The characters a generated password is drawn from, for a `-n` or
+/// charset flag (`None`: letters, digits and symbols).
+fn charset(kind: Option<&str>) -> String {
+    match kind {
+        Some("-n" | "--no-symbols") => ALNUM.into(),
+        Some("--url-safe") => format!("{ALNUM}-_"),
+        Some("--hex") => "0123456789abcdef".into(),
+        Some("--digits") => "0123456789".into(),
+        Some("--base-64") => format!("{ALNUM}+/"),
+        _ => format!("{ALNUM}!\"#$%&'()*+,-./:;<=>?@[\\]^_`{{|}}~"),
     }
 }
 
-/// `pass generate --clip`, for the TUI's generate form: the new password
-/// goes to the clipboard and never to the screen. `kind` is `-n` or a
+/// The length a generated password has unless told otherwise.
+pub fn default_length() -> u32 {
+    std::env::var("PASSWORD_STORE_GENERATED_LENGTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(25)
+}
+
+/// Generate a password into `path` and commit it. `kind` is `-n` or a
 /// charset flag. `in_place` replaces only the first line of an existing
-/// entry. `quiet` runs it without the terminal, failing if gpg would prompt
-/// (as `in_place` can, since it decrypts the old entry).
-pub fn generate_to_clipboard(
+/// entry, keeping the rest. Returns the password, for the caller to copy
+/// or show.
+pub fn generate(
+    sess: &mut Session,
     path: &str,
     kind: Option<&str>,
-    length: u32,
+    length: usize,
     in_place: bool,
-    quiet: bool,
-) -> Result<()> {
-    let mut args = vec!["generate", "--clip"];
-    if in_place {
-        args.push("--in-place");
-    }
-    if kind == Some("-n") {
-        args.push("-n");
-    }
-    let length = length.to_string();
-    args.extend(["--", path, &length]);
-    let env: Vec<(&str, &str)> = kind
-        .and_then(charset)
-        .map(|set| ("PASSWORD_STORE_CHARACTER_SET", set))
-        .into_iter()
-        .collect();
-    if quiet {
-        pass::run_no_prompt_env(&args, &env)
+) -> Result<Zeroizing<String>> {
+    let password = crypto::random_password(&charset(kind), length)?;
+    let content = if in_place {
+        let old = sess.read(path)?;
+        let rest = old.split_once('\n').map_or("", |(_, rest)| rest);
+        Zeroizing::new(format!("{}\n{rest}", *password))
     } else {
-        pass::run_interactive_env(&args, &env)
+        Zeroizing::new(format!("{}\n", *password))
+    };
+    let message = if in_place {
+        format!("Replace generated password for {path}.")
+    } else {
+        format!("Add generated password for {path}.")
+    };
+    sess.save(path, content.as_bytes(), &message)?;
+    // Whatever was there, it now starts with a password.
+    sess.files.remove(path);
+    Ok(password)
+}
+
+fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result<()> {
+    let has = |names: &[&str]| flags.iter().any(|f| names.contains(f));
+    let kinds: Vec<&str> = flags
+        .iter()
+        .copied()
+        .filter(|f| matches!(*f, "--url-safe" | "--hex" | "--digits" | "--base-64"))
+        .collect();
+    if kinds.len() > 1 {
+        bail!("only one of --url-safe, --hex, --digits, --base-64 may be given");
     }
+    let no_symbols = has(&["-n", "--no-symbols"]);
+    if no_symbols && !kinds.is_empty() {
+        bail!("-n and {} pick different characters; drop one", kinds[0]);
+    }
+    let kind = kinds.first().copied().or(no_symbols.then_some("-n"));
+    let path = sess.resolve(positional[0]);
+    let length = match positional.get(1) {
+        Some(n) => n
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .with_context(|| format!("length must be a positive number, not {n:?}"))?,
+        None => default_length() as usize,
+    };
+    if sess.store.is_dir(&path) {
+        bail!("{} is a folder", store::display(&path));
+    }
+    let exists = sess.store.is_entry(&path);
+    let in_place = has(&["-i", "--in-place"]);
+    if in_place && !exists {
+        bail!("{} doesn't exist (drop -i)", store::display(&path));
+    }
+    if exists
+        && !in_place
+        && !has(&["-f", "--force"])
+        && !confirm(&format!(
+            "{} exists. Replace it entirely?",
+            store::display(&path)
+        ))?
+    {
+        return Ok(());
+    }
+    let password = generate(sess, &path, kind, length, in_place)?;
+    if has(&["-c", "--clip"]) {
+        clipboard::copy(&password)?;
+        println!(
+            "generated {} and copied it to the clipboard; it clears in {} seconds",
+            store::display(&path).green(),
+            clipboard::clear_after()
+        );
+    } else {
+        println!(
+            "the generated password for {} is:\n{}",
+            store::display(&path).green(),
+            password.yellow().bold()
+        );
+    }
+    Ok(())
+}
+
+/// A temporary file to edit a decrypted entry in: in RAM (`/dev/shm`)
+/// when there is one, readable only by you, and wiped on drop.
+struct EditFile {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl EditFile {
+    fn new(name: &str, content: &[u8]) -> Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let shm = Path::new("/dev/shm");
+        let base = if shm.is_dir() {
+            shm.to_path_buf()
+        } else {
+            let tmp = std::env::temp_dir();
+            eprintln!(
+                "{} no /dev/shm here; the decrypted entry sits in {} while you edit",
+                "warning:".yellow().bold(),
+                tmp.display()
+            );
+            tmp
+        };
+        let mut tag = [0u8; 8];
+        getrandom::fill(&mut tag).map_err(|e| anyhow::anyhow!("no randomness from the OS: {e}"))?;
+        let tag: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = base.join(format!("ezer-pass.{tag}"));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+        let edit = EditFile {
+            file: dir.join(format!("{name}.txt")),
+            dir,
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&edit.file)
+            .and_then(|mut f| f.write_all(content))
+            .with_context(|| format!("cannot write {}", edit.file.display()))?;
+        Ok(edit)
+    }
+}
+
+impl Drop for EditFile {
+    fn drop(&mut self) {
+        if let Ok(len) = std::fs::metadata(&self.file).map(|m| m.len()) {
+            let _ = std::fs::write(&self.file, vec![0u8; len as usize]);
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Edit an entry (or start a new one) in `$VISUAL`/`$EDITOR`.
+fn cmd_edit(sess: &mut Session, arg: &str) -> Result<()> {
+    let path = sess.resolve(arg);
+    if path.is_empty() || sess.store.is_dir(&path) {
+        bail!("{} is a folder", store::display(&path));
+    }
+    let exists = sess.store.is_entry(&path);
+    let old = if exists {
+        sess.read(&path)?
+    } else {
+        Zeroizing::new(String::new())
+    };
+    let name = path.rsplit('/').next().unwrap_or("entry");
+    let edit = EditFile::new(name, old.as_bytes())?;
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    // Through the shell, so an editor with arguments ("code -w") works.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(&edit.file)
+        .status()
+        .with_context(|| format!("failed to run {editor}"))?;
+    if !status.success() {
+        bail!("{editor} failed; nothing was saved");
+    }
+    let mut new = Zeroizing::new(Vec::new());
+    std::fs::File::open(&edit.file)
+        .and_then(|mut f| f.read_to_end(&mut new))
+        .context("cannot read the edited entry back")?;
+    drop(edit);
+    if exists && new[..] == *old.as_bytes() {
+        println!("{} unchanged", store::display(&path));
+        return Ok(());
+    }
+    if !exists && new.is_empty() {
+        println!("nothing written; {} not created", store::display(&path));
+        return Ok(());
+    }
+    let editor_name = editor.split_whitespace().next().unwrap_or(&editor);
+    let message = if exists {
+        format!("Edit password for {path} using {editor_name}.")
+    } else {
+        format!("Add password for {path} using {editor_name}.")
+    };
+    sess.save(&path, &new, &message)?;
+    let text = String::from_utf8_lossy(&new);
+    let size = fileio::decode_payload(&text)
+        .ok()
+        .map(|f| f.data.len() as u64);
+    sess.files.learn(&path, size);
+    Ok(())
+}
+
+/// Remove an entry, or a folder with `recursive`. Asks first unless
+/// `force`.
+fn cmd_rm(sess: &mut Session, path: &str, recursive: bool, force: bool) -> Result<()> {
+    let store = &sess.store;
+    if path.is_empty() {
+        bail!("refusing to remove the whole store");
+    }
+    let is_entry = store.is_entry(path);
+    if !is_entry && !store.is_dir(path) {
+        bail!("{} is not in the password store", store::display(path));
+    }
+    if !is_entry && !recursive {
+        bail!(
+            "{} is a folder (rm -r removes it and everything in it)",
+            store::display(path)
+        );
+    }
+    let shown = if is_entry {
+        store::display(path)
+    } else {
+        store::display_dir(path)
+    };
+    if !force && !confirm(&format!("Remove {shown}?"))? {
+        return Ok(());
+    }
+    let changed = if is_entry {
+        let file = entry_file(path);
+        std::fs::remove_file(store.root().join(&file))
+            .with_context(|| format!("cannot remove {shown}"))?;
+        file
+    } else {
+        std::fs::remove_dir_all(store.root().join(path))
+            .with_context(|| format!("cannot remove {shown}"))?;
+        path.to_string()
+    };
+    store.remove_empty_dirs(store::parent(path));
+    sess.commit(&[&changed], &format!("Remove {path} from store."))?;
+    if sess.interactive || !force {
+        println!("removed {shown}");
+    }
+    Ok(())
+}
+
+/// The recipients of `dir`, as comparable strings.
+fn recipient_set(store: &store::Store, dir: &str) -> Result<Vec<String>> {
+    let (_, recipients) = store.recipients(dir)?;
+    let mut set: Vec<String> = recipients.iter().map(|r| r.to_string()).collect();
+    set.sort();
+    set.dedup();
+    Ok(set)
+}
+
+/// Move (or copy) an entry or folder. `dest` is where it goes, or a folder
+/// to put it in (an existing one, or written with a trailing slash).
+/// Entries landing under different recipients are re-encrypted for them.
+/// Returns where it landed, or `None` if the user declined to overwrite.
+fn cmd_move(
+    sess: &mut Session,
+    copy: bool,
+    src: &str,
+    dest_arg: &str,
+    force: bool,
+) -> Result<Option<String>> {
+    let dest = sess.resolve(dest_arg);
+    let store = &sess.store;
+    let landed = if store.is_dir(&dest) || dest_arg.ends_with('/') {
+        let name = src.rsplit('/').next().unwrap_or(src);
+        store::resolve(&dest, name)
+    } else {
+        dest
+    };
+    let is_entry = store.is_entry(src);
+    if src.is_empty() || (!is_entry && !store.is_dir(src)) {
+        bail!("{} is not in the password store", store::display(src));
+    }
+    if landed == src {
+        bail!("{} is already there", store::display(src));
+    }
+    if !is_entry && (landed.is_empty() || landed.starts_with(&format!("{src}/"))) {
+        bail!("cannot put {} inside itself", store::display_dir(src));
+    }
+    // Every entry that moves, as (from, to).
+    let pairs: Vec<(String, String)> = if is_entry {
+        if store.is_dir(&landed) {
+            bail!("{} is a folder", store::display(&landed));
+        }
+        vec![(src.to_string(), landed.clone())]
+    } else {
+        if store.is_entry(&landed) {
+            bail!("{} is an entry", store::display(&landed));
+        }
+        store
+            .walk()
+            .into_iter()
+            .filter(|(p, is_dir)| !is_dir && p.starts_with(&format!("{src}/")))
+            .map(|(p, _)| {
+                let to = format!("{landed}{}", &p[src.len()..]);
+                (p, to)
+            })
+            .collect()
+    };
+    let clashes = pairs.iter().filter(|(_, to)| store.is_entry(to)).count();
+    if clashes > 0 && !force {
+        let question = if is_entry {
+            format!("{} exists. Overwrite it?", store::display(&landed))
+        } else {
+            format!(
+                "{clashes} entr{} in {} would be overwritten. Go ahead?",
+                if clashes == 1 { "y" } else { "ies" },
+                store::display_dir(&landed)
+            )
+        };
+        if !confirm(&question)? {
+            return Ok(None);
+        }
+    }
+    let before: Vec<Vec<String>> = pairs
+        .iter()
+        .map(|(from, _)| recipient_set(store, store::parent(from)))
+        .collect::<Result<_>>()?;
+    // A folder moving somewhere new goes in one piece, taking its own
+    // `.age-recipients` (and empty subfolders) along.
+    let whole = !is_entry && !store.is_dir(&landed) && !copy;
+    if whole {
+        let to = store.root().join(&landed);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(store.root().join(src), &to)
+            .with_context(|| format!("cannot move {}", store::display_dir(src)))?;
+    } else if !is_entry && !store.is_dir(&landed) {
+        copy_tree(&store.root().join(src), &store.root().join(&landed))?;
+    }
+    for ((from, to), before) in pairs.iter().zip(before) {
+        let after = recipient_set(&sess.store, store::parent(to))?;
+        let from_file = if whole {
+            sess.store.entry_file(to)
+        } else {
+            sess.store.entry_file(from)
+        };
+        if after != before {
+            sess.unlock()?;
+            let keys = sess.keys.as_ref().expect("unlocked");
+            let ciphertext = std::fs::read(&from_file)?;
+            let plain = crypto::decrypt(keys, &ciphertext)
+                .with_context(|| format!("cannot decrypt {}", store::display(from)))?;
+            sess.store.write_entry(to, &plain)?;
+        } else if !whole {
+            let data = std::fs::read(&from_file)?;
+            sess.store.write_file(&sess.store.entry_file(to), &data)?;
+        }
+        if !copy && !whole {
+            std::fs::remove_file(&from_file)?;
+        }
+    }
+    let (src_path, landed_path) = if is_entry {
+        (entry_file(src), entry_file(&landed))
+    } else {
+        (src.to_string(), landed.clone())
+    };
+    if !copy {
+        if !is_entry && !whole {
+            std::fs::remove_dir_all(sess.store.root().join(src))?;
+        }
+        sess.store.remove_empty_dirs(store::parent(src));
+    }
+    let message = if copy {
+        format!("Copy {src} to {landed}.")
+    } else {
+        format!("Rename {src} to {landed}.")
+    };
+    sess.commit(&[&src_path, &landed_path], &message)?;
+    Ok(Some(landed))
+}
+
+/// Copy a folder and everything in it.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// List entries and folders whose path contains any of `terms`, ignoring
+/// case.
+fn cmd_find(sess: &Session, terms: &[&str]) {
+    let terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    let mut found = 0;
+    for (path, is_dir) in sess.store.walk() {
+        let lower = path.to_lowercase();
+        if !terms.iter().any(|t| lower.contains(t.as_str())) {
+            continue;
+        }
+        found += 1;
+        if is_dir {
+            println!("{}", store::display_dir(&path).blue().bold());
+        } else if sess.files.is_file(&path) {
+            println!("{}", store::display(&path).magenta());
+        } else {
+            println!("{}", store::display(&path));
+        }
+    }
+    if found == 0 {
+        println!("{}", "no matches".dimmed());
+    }
+}
+
+/// Print the lines of every entry containing `text`. Case is ignored when
+/// asked, or when `text` is all lower case. File entries are skipped.
+fn cmd_grep(sess: &mut Session, text: &str, ignore_case: bool) -> Result<()> {
+    let ignore_case = ignore_case || !text.chars().any(char::is_uppercase);
+    let needle = if ignore_case {
+        text.to_lowercase()
+    } else {
+        text.to_string()
+    };
+    sess.unlock()?;
+    let entries: Vec<String> = sess
+        .store
+        .walk()
+        .into_iter()
+        .filter(|(_, is_dir)| !is_dir)
+        .map(|(p, _)| p)
+        .collect();
+    let (mut hits, mut failed) = (0, 0);
+    for path in entries {
+        let keys = sess.keys.as_ref().expect("unlocked");
+        let Ok(content) = sess.store.read_entry(&path, keys) else {
+            failed += 1;
+            continue;
+        };
+        if fileio::marker_filename(&content).is_some() {
+            continue;
+        }
+        let mut header = false;
+        for line in content.lines() {
+            let hay = if ignore_case {
+                line.to_lowercase()
+            } else {
+                line.to_string()
+            };
+            let Some(at) = hay.find(&needle) else {
+                continue;
+            };
+            if !header {
+                println!("{}", store::display(&path).blue().bold());
+                header = true;
+                hits += 1;
+            }
+            // Lowercasing can change byte lengths; only highlight when the
+            // match lines up with the original line.
+            match line.get(at..at + needle.len()) {
+                Some(m) if hay.len() == line.len() => println!(
+                    "  {}{}{}",
+                    &line[..at],
+                    m.red().bold(),
+                    &line[at + needle.len()..]
+                ),
+                _ => println!("  {line}"),
+            }
+        }
+    }
+    if hits == 0 {
+        println!("{}", "no matches".dimmed());
+    }
+    if failed > 0 {
+        println!(
+            "{} {failed} entr{} couldn't be decrypted",
+            "warning:".yellow().bold(),
+            if failed == 1 { "y" } else { "ies" }
+        );
+    }
+    Ok(())
 }
 
 /// Decrypt every entry (in `arg`, or the whole store) to find the file
 /// entries, and bring the file index in line. For stores whose files were
-/// imported before the index existed, or with plain `pass` elsewhere.
+/// imported before the index existed, or with another tool.
 /// Nothing decrypted is printed.
 fn cmd_reindex(sess: &mut Session, arg: Option<&str>) -> Result<()> {
     let dir = arg.map(|a| sess.resolve(a)).unwrap_or_default();
@@ -417,28 +904,10 @@ fn cmd_reindex(sess: &mut Session, arg: Option<&str>) -> Result<()> {
     let total = entries.len();
     let (mut files, mut found, mut dropped) = (0, 0, 0);
     let mut failed = Vec::new();
-    // Ask for a passphrase at most once: after a cancelled prompt, entries
-    // gpg-agent can't decrypt on its own are skipped.
-    let mut may_prompt = true;
-    for (i, path) in entries.iter().enumerate() {
-        eprint!(
-            "\r\x1b[K{} {}/{total} {}",
-            "checking".dimmed(),
-            i + 1,
-            store::display(path)
-        );
-        let args = ["show", "--", path.as_str()];
-        let content = match pass::capture_no_prompt(&args) {
-            Ok(c) => Ok(c),
-            Err(e) if !may_prompt => Err(e),
-            Err(_) => {
-                eprint!("\r\x1b[K");
-                let result = pass::show(path);
-                may_prompt = result.is_ok();
-                result
-            }
-        };
-        let Ok(content) = content else {
+    sess.unlock()?;
+    for path in &entries {
+        let keys = sess.keys.as_ref().expect("unlocked");
+        let Ok(content) = sess.store.read_entry(path, keys) else {
             failed.push(path.clone());
             continue;
         };
@@ -463,7 +932,6 @@ fn cmd_reindex(sess: &mut Session, arg: Option<&str>) -> Result<()> {
         }
         sess.files.learn(path, size);
     }
-    eprint!("\r\x1b[K");
     println!(
         "checked {total} entr{}: {files} file entr{} ({found} newly found, {dropped} no longer files)",
         if total == 1 { "y" } else { "ies" },
@@ -491,13 +959,53 @@ fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result
         return cmd_import(sess, positional[0], positional[1], force);
     }
     expect_args(positional, "insert [-m] [-e] [-f] <entry>", 1, 1)?;
+    let has = |names: &[&str]| flags.iter().any(|f| names.contains(f));
     let path = sess.resolve(positional[0]);
-    let mut pass_args = vec!["insert"];
-    pass_args.extend(flags);
-    pass_args.push("--");
-    pass_args.push(&path);
-    pass::run_interactive(&pass_args)?;
-    sess.files.remove(&path);
+    let shown = store::display(&path);
+    if path.is_empty() || sess.store.is_dir(&path) {
+        bail!("{shown} is a folder");
+    }
+    if sess.store.is_entry(&path)
+        && !has(&["-f", "--force"])
+        && !confirm(&format!("{shown} exists. Overwrite it?"))?
+    {
+        return Ok(());
+    }
+    let content = if has(&["-m", "--multiline"]) {
+        println!("Enter the contents of {shown}, then Ctrl-D on a line of its own:");
+        let mut text = Zeroizing::new(String::new());
+        std::io::stdin().read_to_string(&mut text)?;
+        text
+    } else if has(&["-e", "--echo"]) {
+        print!("Enter password for {shown}: ");
+        std::io::stdout().flush()?;
+        let mut line = Zeroizing::new(String::new());
+        std::io::stdin().lock().read_line(&mut line)?;
+        Zeroizing::new(format!("{}\n", line.trim_end_matches(['\r', '\n'])))
+    } else {
+        let first = Zeroizing::new(rpassword::prompt_password(format!(
+            "Enter password for {shown}: "
+        ))?);
+        let again = Zeroizing::new(rpassword::prompt_password(format!(
+            "Retype password for {shown}: "
+        ))?);
+        if first != again {
+            bail!("the passwords don't match; nothing saved");
+        }
+        Zeroizing::new(format!("{}\n", *first))
+    };
+    if content.is_empty() {
+        bail!("nothing entered; nothing saved");
+    }
+    sess.save(
+        &path,
+        content.as_bytes(),
+        &format!("Add given password for {path} to store."),
+    )?;
+    let size = fileio::decode_payload(&content)
+        .ok()
+        .map(|f| f.data.len() as u64);
+    sess.files.learn(&path, size);
     Ok(())
 }
 
@@ -529,8 +1037,12 @@ fn cmd_import(sess: &mut Session, os_file: &str, entry: &str, force: bool) -> Re
         .file_name()
         .context("path has no filename")?
         .to_string_lossy();
-    let payload = fileio::encode_payload(&filename, &data);
-    pass::insert_multiline(&path, payload.as_bytes())?;
+    let payload = Zeroizing::new(fileio::encode_payload(&filename, &data));
+    sess.save(
+        &path,
+        payload.as_bytes(),
+        &format!("Add file {filename} as {path}."),
+    )?;
     sess.files.insert(&path, data.len() as u64);
     println!(
         "imported {os_file} ({} bytes) as {}",
@@ -543,7 +1055,7 @@ fn cmd_import(sess: &mut Session, os_file: &str, entry: &str, force: bool) -> Re
 /// Export a file entry from the password store back to the OS filesystem.
 fn cmd_export(sess: &mut Session, entry: &str, dest: Option<&str>, force: bool) -> Result<()> {
     let path = sess.resolve_entry(entry)?;
-    let content = pass::show(&path)?;
+    let content = sess.read(&path)?;
     if fileio::marker_filename(&content).is_none() {
         sess.files.remove(&path);
     }
@@ -586,28 +1098,27 @@ fn print_help() {
         "create a directory (synced once it holds an entry)",
     );
     println!();
-    section("passwords (forwarded to pass, paths relative to the current directory)");
+    section("passwords (paths relative to the current directory)");
     entry(
         "show [-c] <entry>",
-        "print an entry, or -c to copy to the clipboard",
+        "print an entry, or -c to copy its first line",
     );
-    entry("insert [-m] [-e] <entry>", "add an entry (interactive)");
     entry(
-        "generate [-n] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
-        "generate a password (-n alnum only, or pick a charset)",
+        "insert [-m] [-e] [-f] <entry>",
+        "add an entry (-m several lines, -e echo)",
     );
-    entry("edit <entry>", "edit in $EDITOR");
-    entry("rm [-r] <path>", "remove an entry or directory");
-    entry("mv <src> <dest>", "rename/move");
-    entry("cp <src> <dest>", "copy");
-    entry("find <terms>", "list entries matching names");
-    entry("grep <pattern>", "search inside decrypted entries");
     entry(
-        "git <git-args>",
-        "run git in the store (pull offered on startup, push on exit)",
+        "generate [-n] [-c] [-i] [-f] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
+        "generate a password (-i replaces only the first line)",
     );
+    entry("edit <entry>", "edit in $VISUAL / $EDITOR");
+    entry("rm [-r] [-f] <path>", "remove an entry or folder");
+    entry("mv [-f] <src> <dest>", "rename/move");
+    entry("cp [-f] <src> <dest>", "copy");
+    entry("find <terms>", "list entries whose names match");
+    entry("grep [-i] <text>", "search inside entries");
     println!();
-    section("files (base64-encoded pass entries)");
+    section("files (base64-encoded entries)");
     entry(
         "import [--force] <file> <entry>",
         "store a file as an entry (1 MiB soft limit)",
@@ -621,7 +1132,17 @@ fn print_help() {
         "find file entries made before ezer-pass tracked them",
     );
     println!();
-    section("version control (pass git)");
+    section("keys and setup (age)");
+    entry(
+        "init [-p folder] [age1...]",
+        "make your identity if needed, and set who a folder is encrypted to",
+    );
+    entry(
+        "migrate",
+        "move a store made by `pass` from gpg to age, once",
+    );
+    println!();
+    section("version control");
     entry(
         "git <git-args>",
         "run git in the store (pull offered on startup, push on exit)",

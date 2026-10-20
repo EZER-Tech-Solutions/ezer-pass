@@ -103,23 +103,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_unlock(f: &mut Frame, u: &Unlock) {
     let dots = "•".repeat(u.input.text.chars().count());
     let status = match (&u.error, u.working) {
-        (_, true) => Line::from("unlocking…".fg(ACCENT)),
+        (_, true) => Line::from("unlocking…".fg(MARK)),
         (Some(e), _) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
         (None, _) => "once per session; kept in memory only".dim().into(),
     };
     let lines = vec![
         Line::from(vec![
-            BAR.fg(ACCENT),
-            "passphrase ".fg(ACCENT).bold(),
+            BAR.fg(DANGER),
+            "passphrase ".fg(MARK).bold(),
             dots.clone().bold(),
         ]),
         "".into(),
         status,
     ];
-    let mut keys = hint(&[("⏎", "unlock"), ("esc", "cancel")]);
+    let mut keys = hint_in(&[("⏎", "unlock"), ("esc", "cancel")], MARK);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    let block = popup(Line::from(" unlock ").bold(), ACCENT)
+    let block = popup(Line::from(" unlock ").bold(), MARK)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
     let area = popup_fixed(f.area(), 56.min(f.area().width), lines.len() as u16 + 4);
@@ -923,12 +923,17 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
 }
 
 fn hint(keys: &[(&str, &str)]) -> Line<'static> {
+    hint_in(keys, ACCENT)
+}
+
+/// `[key] what it does` pairs, with the keys in `color`.
+fn hint_in(keys: &[(&str, &str)], color: Color) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, (k, desc)) in keys.iter().enumerate() {
         if i > 0 {
             spans.push("  ".into());
         }
-        spans.push(format!("[{k}]").fg(ACCENT).bold());
+        spans.push(format!("[{k}]").fg(color).bold());
         spans.push(format!(" {desc}").dim());
     }
     Line::from(spans)

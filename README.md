@@ -43,12 +43,13 @@ Run `ezer-pass` with no arguments:
 
 ```
 ╭ ezer-pass  ───────────────────────────── ~/.local/share/ezer-pass/default ╮
-│   ▼ servers/                                                              │
-│▌  ├─▶ prod/                                                               │
-│▌✂ ├─• web1                                                                │
-│   └─▪ tls-cert                                                            │
-│   ▶ personal/                                                             │
-╰────────────────────────────────────────────────────────────────────── 3/5 ╯
+│   ▼ default                                                               │
+│   ├─▼ servers/                                                            │
+│▌  │ ├─▶ prod/                                                             │
+│▌✂ │ ├─• web1                                                              │
+│   │ └─▪ tls-cert                                                          │
+│   └─▶ personal/                                                           │
+╰────────────────────────────────────────────────────────────────────── 4/6 ╯
 ╭ recent ─────────────────────────╮╭ info ──────────────────────────────────╮
 │ 1 /servers/web1       ▰▰▰▱▱ 32s ││ /servers/web1                          │
 │ 2 /apple/id                     ││ password · modified 3 days ago         │
@@ -59,11 +60,14 @@ Run `ezer-pass` with no arguments:
 [⏎] copy  [v] view  [e] edit  [r] rename  [d] delete  [␣] mark  [/] filter  [?] help
 ```
 
-The top pane is a collapsible tree of the store. The bottom pane shows your
-recently used entries (with a countdown while one is on the clipboard), details
-of the highlighted row, the cut/copy buffer, marks, and git sync state. The
-footer shows only the keys that do something right now: they change with the
-highlighted row (password, file, folder), and while items are marked or cut.
+The top pane is a collapsible tree of the store, headed by the store itself:
+a root row named after the context, so creating, pasting and the rest work at
+the top level like in any folder (`r` on it renames the context). The bottom
+pane shows your recently used entries (with a countdown while one is on the
+clipboard), details of the highlighted row, the cut/copy buffer, marks, and git
+sync state. The footer shows only the keys that do something right now: they
+change with the highlighted row (password, file, folder), and while items are
+marked or cut.
 
 | Key | Action |
 |---|---|
@@ -144,7 +148,7 @@ hunter2
 | `generate [-n\|--url-safe\|--digits\|--hex] [--no-ambiguous] [--exclude=CHARS] [-c] [-i] [-f] <entry> [len]` | generate a password; `-c` copies instead of printing, `-i` replaces only the first line. Symbols by default; `-n` letters and digits, `--url-safe` adds only `-_` (for database URLs and `.env` files), `--digits` for PINs, `--hex` for tokens. It always holds a capital, a small letter, a digit (and a symbol, for the default) when long enough. `--no-ambiguous` leaves out `0O1lI\|`, `--exclude` any characters a site refuses |
 | `edit <entry>` | edit in `$VISUAL` / `$EDITOR`, via a private file in `/dev/shm` that is wiped afterwards |
 | `rm [-r] [-f] <path>` | remove an entry or directory |
-| `mv [-f] <src> <dest>` / `cp [-f] <src> <dest>` | rename or copy, re-encrypting for the new folder's recipients if they differ |
+| `mv [-f] <src> <dest>` / `cp [-f] <src> <dest>` | rename or copy, re-encrypting for the new folder's recipients if they differ. Either side can be in another context: `mv work:/servers/web1 /servers/` |
 | `find <terms>` | list entries whose names contain any term |
 | `grep [-i] <text>` | search inside entries (ignores case unless `text` has capitals) |
 | `import [--force] <file> <entry>` | store a file as a base64 entry |
@@ -177,8 +181,17 @@ different place, and switch between them without leaving the TUI.
 
 - `C` in the TUI opens the picker. `⏎` switches; the header names the context
   you are in. If the store you're leaving has unpushed commits, it offers to
-  push them first (`esc` stays put). Switching drops marks, the cut/copy buffer
-  and the filter; recent entries are kept per context.
+  push them first (`esc` stays put). Switching drops marks and the filter;
+  recent entries are kept per context.
+- To move entries between contexts, cut (`x`) or copy (`y`) them, switch with
+  `C`, and paste with `p`. They are
+  re-encrypted if the two stores have different recipients, and committed in
+  both: added in the destination first, then removed from the source, so a
+  failure part way never loses anything. From the shell or explore mode, name
+  the other side as `context:/path`: `ezer-pass mv work:/servers/web1 /servers/`,
+  `cp /apple personal:/`. Moving files between stores by hand leaves git
+  behind, with the entries showing as deleted in one repo and unknown in the
+  other.
 - `n` in the picker adds one: `personal` makes an empty store in
   `~/.local/share/ezer-pass/personal` and encrypts it to your key;
   `acme ~/clients/acme-store` uses (or makes) the store at that path.

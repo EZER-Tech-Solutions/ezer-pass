@@ -1,4 +1,4 @@
-use super::app::{App, Confirm, Mode, Picker, Row, Secret, Unlock, basename};
+use super::app::{App, Confirm, Mode, Picker, Row, Secret, Unlock, basename, join};
 use super::generate::{Field, Form};
 use super::history;
 use super::palette;
@@ -219,8 +219,9 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
     }
     app.page = area.height.saturating_sub(2) as usize;
 
-    if app.rows.is_empty() {
-        let msg: Vec<Line> = if app.filtering() {
+    // Only the root row: say so beneath it.
+    let empty = (app.rows.len() <= 1).then(|| -> Vec<Line> {
+        if app.filtering() {
             vec!["no matches".dim().into()]
         } else {
             vec![
@@ -228,21 +229,20 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                 "".into(),
                 hint(&[("i", "insert"), ("g", "generate"), ("I", "import a file")]),
             ]
-        };
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        let [middle] = Layout::vertical([Constraint::Length(msg.len() as u16)])
-            .flex(Flex::Center)
-            .areas(inner);
-        f.render_widget(Paragraph::new(msg).centered(), middle);
-        return;
-    }
+        }
+    });
+    let inner = block.inner(area);
 
-    let cut: Vec<&str> = match &app.buffer {
+    // A buffer from another context marks nothing in this tree.
+    let here = app
+        .buffer
+        .as_ref()
+        .filter(|b| !b.elsewhere(&app.sess.context));
+    let cut: Vec<&str> = match here {
         Some(b) if b.cut => b.paths.iter().map(String::as_str).collect(),
         _ => Vec::new(),
     };
-    let copied: Vec<&str> = match &app.buffer {
+    let copied: Vec<&str> = match here {
         Some(b) if !b.cut => b.paths.iter().map(String::as_str).collect(),
         _ => Vec::new(),
     };
@@ -289,7 +289,9 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                     spans.push(input.text.clone().underlined());
                 }
                 _ => {
-                    let mut name = if row.is_dir {
+                    let mut name = if row.path.is_empty() {
+                        row.name.clone().fg(ACCENT).bold()
+                    } else if row.is_dir {
                         format!("{}/", row.name).fg(DIR).bold()
                     } else if is_file {
                         row.name.clone().fg(FILE)
@@ -313,6 +315,17 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::new().bg(SHADE))
         .scroll_padding(2);
     f.render_stateful_widget(list, area, &mut app.list);
+    if let Some(msg) = empty {
+        let below = Rect {
+            y: inner.y + 1,
+            height: inner.height.saturating_sub(1),
+            ..inner
+        };
+        let [middle] = Layout::vertical([Constraint::Length(msg.len() as u16)])
+            .flex(Flex::Center)
+            .areas(below);
+        f.render_widget(Paragraph::new(msg).centered(), middle);
+    }
 
     if app.rows.len() > app.page {
         let mut state = ScrollbarState::new(app.rows.len().saturating_sub(app.page))
@@ -406,24 +419,31 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
 
     match app.selected() {
         Some(row) if row.is_dir => {
-            let mut name = path_spans(&row.path, Style::new().fg(DIR).bold());
-            name.push("/".fg(DIR).bold());
-            lines.push(Line::from(name));
+            let root = row.path.is_empty();
+            if root {
+                lines.push(Line::from(vec![
+                    row.name.clone().fg(ACCENT).bold(),
+                    format!("  {}", crate::context::tilde(app.sess.store.root())).dim(),
+                ]));
+            } else {
+                let mut name = path_spans(&row.path, Style::new().fg(DIR).bold());
+                name.push("/".fg(DIR).bold());
+                lines.push(Line::from(name));
+            }
             let detail = match app.sess.store.list(&row.path) {
                 Ok(children) => {
                     let count = |pred: &dyn Fn(&store::Node) -> bool| {
                         children.iter().filter(|c| pred(c)).count()
                     };
                     let dirs = count(&|c| c.is_dir);
-                    let files = count(&|c| {
-                        !c.is_dir && app.sess.files.is_file(&format!("{}/{}", row.path, c.name))
-                    });
+                    let files =
+                        count(&|c| !c.is_dir && app.sess.files.is_file(&join(&row.path, &c.name)));
                     let passwords = children.len() - dirs - files;
                     let plural = |n: usize, one: &str, many: &str| {
                         format!("{n} {}", if n == 1 { one } else { many })
                     };
                     let mut parts = vec![
-                        "folder".to_string(),
+                        if root { "store" } else { "folder" }.to_string(),
                         plural(passwords, "password", "passwords"),
                     ];
                     if files > 0 {
@@ -472,13 +492,16 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         match &app.buffer {
             Some(b) => {
                 let names: Vec<&str> = b.paths.iter().map(|p| basename(p)).collect();
-                vec![
+                let mut spans = vec![
                     if b.cut { "✂ cut " } else { "+ copied " }.fg(MARK).bold(),
                     names.join(", ").into(),
-                    "   ".into(),
-                    "[p]".fg(ACCENT).bold(),
-                    " paste".dim(),
-                ]
+                ];
+                if b.elsewhere(&app.sess.context) {
+                    spans.push(" from ".dim());
+                    spans.push(b.context.name.clone().fg(ACCENT).bold());
+                }
+                spans.extend(["   ".into(), "[p]".fg(ACCENT).bold(), " paste".dim()]);
+                spans
             }
             None => vec!["empty".dim()],
         },
@@ -669,9 +692,26 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
             .fg(MARK)
             .bold(),
         );
-        vec![("p", "paste here"), ("esc", "cancel")]
+        if b.elsewhere(&app.sess.context) {
+            prefix.push(format!("from {}  ", b.context.name).fg(ACCENT).bold());
+        }
+        vec![
+            ("p", "paste here"),
+            ("C", "other context"),
+            ("esc", "cancel"),
+        ]
     } else {
         match app.selected() {
+            Some(row) if row.path.is_empty() => vec![
+                ("g", "generate"),
+                ("i", "insert"),
+                ("n", "new folder"),
+                ("I", "import file"),
+                ("r", "rename context"),
+                ("C", "contexts"),
+                ("/", "filter"),
+                ("u", "history"),
+            ],
             Some(row) if row.is_dir => vec![
                 (
                     "⏎",
@@ -1232,6 +1272,7 @@ fn draw_help(f: &mut Frame) {
                 ("␣ space", "mark / unmark"),
                 ("x  y", "cut / copy marked or highlighted"),
                 ("p", "paste into highlighted folder"),
+                ("C then p", "paste into another context"),
                 ("r", "rename in place"),
                 ("d", "delete marked or highlighted"),
                 ("u", "history: undo or roll back changes"),

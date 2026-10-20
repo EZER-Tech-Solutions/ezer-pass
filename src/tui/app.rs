@@ -122,6 +122,16 @@ pub struct Row {
 pub struct Buffer {
     pub cut: bool,
     pub paths: Vec<String>,
+    /// The context the paths are in; it survives a switch, so `p` in
+    /// another context moves or copies them across.
+    pub context: Context,
+}
+
+impl Buffer {
+    /// Whether the paths are in another context than `here`.
+    pub fn elsewhere(&self, here: &Context) -> bool {
+        self.context.name != here.name
+    }
 }
 
 /// The `/` filter. `index` is every store path, walked when the filter
@@ -279,8 +289,10 @@ impl App {
             .map(|r| r.path.clone())
     }
 
+    /// Whether a folder's contents show. The root row (`""`, named after
+    /// the context) is always open.
     pub fn is_expanded(&self, path: &str) -> bool {
-        self.filtering() || self.expanded.contains(path)
+        path.is_empty() || self.filtering() || self.expanded.contains(path)
     }
 
     /// Whether a non-empty filter is narrowing the tree.
@@ -305,7 +317,15 @@ impl App {
     fn rebuild(&mut self, select: Option<String>) {
         let keep = select.or_else(|| self.selected_path());
         let old_index = self.list.selected().unwrap_or(0);
-        let mut rows = Vec::new();
+        // The store itself heads the tree, so new things, pastes and the
+        // rest can target its top level like any folder.
+        let mut rows = vec![Row {
+            path: String::new(),
+            name: self.sess.context.name.clone(),
+            depth: 0,
+            is_dir: true,
+            context_only: self.filtering(),
+        }];
         match &self.filter {
             Some(f) if self.filtering() => {
                 let mut shown = HashSet::new();
@@ -323,7 +343,7 @@ impl App {
                     if shown.contains(path.as_str()) {
                         rows.push(Row {
                             name: basename(path).to_string(),
-                            depth: path.matches('/').count(),
+                            depth: path.matches('/').count() + 1,
                             is_dir: *is_dir,
                             context_only: !matched.contains(path.as_str()),
                             path: path.clone(),
@@ -331,7 +351,7 @@ impl App {
                     }
                 }
             }
-            _ => tree_rows(&self.sess.store, &self.expanded, "", 0, &mut rows),
+            _ => tree_rows(&self.sess.store, &self.expanded, "", 1, &mut rows),
         }
         self.rows = rows;
         let index = keep
@@ -392,7 +412,9 @@ impl App {
         if self.recent.len() != before {
             self.save_recent();
         }
-        if let Some(buf) = &mut self.buffer {
+        if let Some(buf) = &mut self.buffer
+            && !buf.elsewhere(&self.sess.context)
+        {
             buf.paths.retain(exists);
             if buf.paths.is_empty() {
                 self.buffer = None;
@@ -414,7 +436,9 @@ impl App {
         self.expanded = self.expanded.iter().map(rewrite).collect();
         self.marks = self.marks.iter().map(rewrite).collect();
         self.recent = self.recent.iter().map(rewrite).collect();
-        if let Some(buf) = &mut self.buffer {
+        if let Some(buf) = &mut self.buffer
+            && !buf.elsewhere(&self.sess.context)
+        {
             buf.paths = buf.paths.iter().map(rewrite).collect();
         }
         if let Some((path, _)) = &mut self.last_copy {
@@ -1153,8 +1177,8 @@ impl App {
     }
 
     /// Open `target`'s store in place of this one. The identity stays
-    /// unlocked if the two share it; marks, the buffer and the filter are
-    /// dropped, since their paths belong to the old store.
+    /// unlocked if the two share it; marks and the filter are dropped, since
+    /// their paths belong to the old store. The buffer stays, to paste here.
     fn switch(&mut self, target: Context) {
         self.mode = Mode::Browse;
         if let Err(e) = self.sess.switch(target) {
@@ -1165,7 +1189,6 @@ impl App {
         self.last_copy = None;
         self.expanded.clear();
         self.marks.clear();
-        self.buffer = None;
         self.filter = None;
         self.count_contexts();
         self.refresh_git();
@@ -1229,14 +1252,14 @@ impl App {
             KeyCode::Char('H') | KeyCode::Backspace => {
                 if let Some((path, ..)) = row {
                     let section = parent(&path).to_string();
-                    if !section.is_empty() {
-                        self.expanded.remove(&section);
-                        self.rebuild(Some(section));
-                    }
+                    self.expanded.remove(&section);
+                    self.rebuild(Some(section));
                 }
             }
             KeyCode::Enter => match row {
                 Some((path, true, _)) if self.filtering() => self.go_to_dir(&path),
+                // The root stays open.
+                Some((path, true, _)) if path.is_empty() => {}
                 Some((path, true, _)) => {
                     if !self.expanded.remove(&path) {
                         self.expanded.insert(path);
@@ -1270,7 +1293,9 @@ impl App {
                 }
             }
             KeyCode::Char(' ') => {
-                if let Some((path, _, _)) = row {
+                if let Some((path, _, _)) = row
+                    && !path.is_empty()
+                {
                     if !self.marks.remove(&path) {
                         self.marks.insert(path);
                     }
@@ -1279,7 +1304,16 @@ impl App {
             }
             KeyCode::Char('x') => self.fill_buffer(true),
             KeyCode::Char('y') => self.fill_buffer(false),
-            KeyCode::Char('p') => return self.paste(),
+            KeyCode::Char('p') => return self.paste(self.context_dir()),
+            // On the root, renaming is the context's.
+            KeyCode::Char('r') if row.as_ref().is_some_and(|r| r.0.is_empty()) => {
+                let name = self.sess.context.name.clone();
+                if name == context::DEFAULT {
+                    self.error("default can't be renamed");
+                } else {
+                    self.prefill(format!("context rename {name} "));
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some((path, _, _)) = row {
                     let input = Input::new(basename(&path).to_string());
@@ -1373,8 +1407,12 @@ impl App {
 
     /// What x/y/d act on: the marked rows, else the highlighted one. A
     /// marked folder covers anything marked inside it.
-    fn targets(&self) -> Vec<String> {
+    fn targets(&mut self) -> Vec<String> {
         if self.marks.is_empty() {
+            if self.selected_path().is_some_and(|p| p.is_empty()) {
+                self.error("that is the whole store — pick what's in it");
+                return Vec::new();
+            }
             return self.selected_path().into_iter().collect();
         }
         let mut paths: Vec<String> = self.marks.iter().cloned().collect();
@@ -1395,24 +1433,30 @@ impl App {
         }
         let n = paths.len();
         self.marks.clear();
-        self.buffer = Some(Buffer { cut, paths });
+        self.buffer = Some(Buffer {
+            cut,
+            paths,
+            context: self.sess.context.clone(),
+        });
         self.info(format!(
-            "{} {n} item{} — p to paste into the highlighted folder",
+            "{} {n} item{} — p pastes into the highlighted folder, here or in another context (C)",
             if cut { "cut" } else { "copied" },
             if n == 1 { "" } else { "s" }
         ));
     }
 
-    /// Plan moving (cut) or copying the buffer into the context folder.
-    /// Refuses the whole paste on any hard conflict; overwriting existing
-    /// entries asks first.
-    fn paste(&mut self) -> Effect {
+    /// Plan moving (cut) or copying the buffer into `target`, the context
+    /// folder. Refuses the whole paste on any hard conflict; overwriting
+    /// existing entries asks first.
+    fn paste(&mut self, target: String) -> Effect {
         let Some(buf) = &self.buffer else {
             self.error("nothing to paste (x cuts, y copies)");
             return Effect::None;
         };
+        if buf.elsewhere(&self.sess.context) {
+            return self.paste_across(target);
+        }
         let store = &self.sess.store;
-        let target = self.context_dir();
         let cut = buf.cut;
         let op = if cut { "mv" } else { "cp" };
         let mut jobs = Vec::new();
@@ -1462,6 +1506,72 @@ impl App {
         if jobs.is_empty() {
             self.info("already here");
             return Effect::None;
+        }
+        let batch = Batch {
+            jobs,
+            pause: Pause::OnError,
+            select,
+            clear_buffer: cut,
+        };
+        if conflicts > 0 {
+            self.mode = Mode::Confirm(Confirm::Overwrite { batch, conflicts });
+            return Effect::None;
+        }
+        Effect::Run(batch)
+    }
+
+    /// Paste a buffer filled in another context: `mv`/`cp` jobs naming the
+    /// source as `context:/path`, which commit in both stores.
+    fn paste_across(&mut self, target: String) -> Effect {
+        let Some(buf) = &self.buffer else {
+            return Effect::None;
+        };
+        let from = buf.context.name.clone();
+        let source = match store::Store::open(buf.context.path.clone()) {
+            Ok(store) => store,
+            Err(e) => {
+                self.error(format!("{e:#}"));
+                return Effect::None;
+            }
+        };
+        let store = &self.sess.store;
+        let cut = buf.cut;
+        let op = if cut { "mv" } else { "cp" };
+        let mut jobs = Vec::new();
+        let mut dests = HashSet::new();
+        let mut conflicts = 0;
+        let mut select = None;
+        for src in &buf.paths {
+            let is_dir = source.is_dir(src);
+            let problem = if !is_dir && !source.is_entry(src) {
+                Some(format!("{from}:{} no longer exists", store::display(src)))
+            } else {
+                None
+            };
+            let dest = join(&target, basename(src));
+            let problem = problem.or_else(|| {
+                if store.is_dir(&dest) || (is_dir && store.is_entry(&dest)) {
+                    Some(format!("{} already exists", store::display(&dest)))
+                } else if !dests.insert(dest.clone()) {
+                    Some(format!("two items would land at {}", store::display(&dest)))
+                } else {
+                    None
+                }
+            });
+            if let Some(msg) = problem {
+                self.error(msg);
+                return Effect::None;
+            }
+            if store.is_entry(&dest) {
+                conflicts += 1;
+            }
+            select.get_or_insert_with(|| dest.clone());
+            jobs.push(Job::new(vec![
+                op.into(),
+                "-f".into(),
+                format!("{from}:{}", store::display(src)),
+                store::display(&dest),
+            ]));
         }
         let batch = Batch {
             jobs,
@@ -1783,13 +1893,7 @@ impl App {
                     .sess
                     .resolve(positional.first().copied().unwrap_or("."));
                 if path.is_empty() {
-                    self.go_to(
-                        self.rows
-                            .first()
-                            .map(|r| r.path.clone())
-                            .as_deref()
-                            .unwrap_or(""),
-                    );
+                    self.go_to("");
                 } else if store.is_dir(&path) {
                     self.go_to_dir(&path);
                 } else if store.is_entry(&path) {
@@ -1901,7 +2005,7 @@ pub fn basename(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, n)| n)
 }
 
-fn join(dir: &str, name: &str) -> String {
+pub fn join(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
     } else {

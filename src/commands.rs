@@ -294,6 +294,17 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "mv" | "cp" => {
             expect_args(&positional, "mv|cp [-f] <src> <dest>", 2, 2)?;
             let force = flags.iter().any(|f| matches!(*f, "-f" | "--force"));
+            // `work:/path` on either side names a path in another context.
+            let (src_q, dest_q) = (
+                qualified(sess, positional[0])?,
+                qualified(sess, positional[1])?,
+            );
+            if src_q.is_some() || dest_q.is_some() {
+                let src = src_q.unwrap_or_else(|| (sess.context.clone(), positional[0]));
+                let dest = dest_q.unwrap_or_else(|| (sess.context.clone(), positional[1]));
+                move_between(sess, cmd == "cp", src, dest, force)?;
+                return Ok(Outcome::Continue);
+            }
             let src = sess.resolve(positional[0]);
             if let Some(landed) = cmd_move(sess, cmd == "cp", &src, positional[1], force)? {
                 sess.files.transfer(&src, &landed, cmd == "cp");
@@ -915,6 +926,213 @@ fn cmd_move(
     Ok(Some(landed))
 }
 
+/// `work:/servers/web1` as the `work` context and `/servers/web1`: when
+/// `work` is a context, and the argument isn't a path in this store.
+fn qualified<'a>(sess: &Session, arg: &'a str) -> Result<Option<(context::Context, &'a str)>> {
+    let Some((name, path)) = arg.split_once(':') else {
+        return Ok(None);
+    };
+    let literal = sess.resolve(arg);
+    if !context::valid_name(name) || sess.store.is_entry(&literal) || sess.store.is_dir(&literal) {
+        return Ok(None);
+    }
+    Ok(context::load()?
+        .into_iter()
+        .find(|c| c.name == name)
+        .map(|c| (c, path)))
+}
+
+/// A session for another context, borrowing this one's unlocked identity
+/// when the two share it (`give_back` returns it).
+fn other_session(sess: &mut Session, ctx: context::Context, borrow_keys: bool) -> Result<Session> {
+    let store =
+        store::Store::open(ctx.path.clone()).with_context(|| format!("in context {}", ctx.name))?;
+    let mut other = Session::new(ctx, store, sess.interactive);
+    if borrow_keys && other.context.identity().ok() == sess.context.identity().ok() {
+        other.keys = sess.keys.take();
+    }
+    Ok(other)
+}
+
+/// Save what `other` learned about file entries, and hand back the
+/// identity it borrowed (or unlocked, if it is the same one).
+fn give_back(sess: &mut Session, mut other: Session) {
+    other.files.prune(|p| other.store.is_entry(p));
+    other.files.save(other.store.root());
+    if sess.keys.is_none() && other.context.identity().ok() == sess.context.identity().ok() {
+        sess.keys = other.keys.take();
+    }
+}
+
+/// `mv`/`cp` where either side may be in another context. Within one
+/// context it is a plain move there; across two it is `move_across`.
+fn move_between(
+    sess: &mut Session,
+    copy: bool,
+    (src_ctx, src_arg): (context::Context, &str),
+    (dest_ctx, dest_arg): (context::Context, &str),
+    force: bool,
+) -> Result<()> {
+    let here = sess.context.name.clone();
+    if src_ctx.name == dest_ctx.name {
+        let in_here = src_ctx.name == here;
+        let mut other = if in_here {
+            None
+        } else {
+            Some(other_session(sess, src_ctx, true)?)
+        };
+        let target = other.as_mut().unwrap_or(sess);
+        let src = target.resolve(src_arg);
+        if let Some(landed) = cmd_move(target, copy, &src, dest_arg, force)? {
+            target.files.transfer(&src, &landed, copy);
+        }
+        if let Some(other) = other {
+            give_back(sess, other);
+        }
+        return Ok(());
+    }
+    // Only the source is decrypted, so only it needs the identity.
+    let mut src_other = if src_ctx.name == here {
+        None
+    } else {
+        Some(other_session(sess, src_ctx, true)?)
+    };
+    let mut dest_other = if dest_ctx.name == here {
+        None
+    } else {
+        Some(other_session(sess, dest_ctx, false)?)
+    };
+    let result = match (&mut src_other, &mut dest_other) {
+        (Some(src), Some(dest)) => move_across(src, src_arg, dest, dest_arg, copy, force),
+        (Some(src), None) => move_across(src, src_arg, sess, dest_arg, copy, force),
+        (None, Some(dest)) => move_across(sess, src_arg, dest, dest_arg, copy, force),
+        (None, None) => unreachable!("the contexts differ"),
+    };
+    for other in [src_other, dest_other].into_iter().flatten() {
+        give_back(sess, other);
+    }
+    result
+}
+
+/// Move (or copy) an entry or folder from one context's store into
+/// another's. It lands, re-encrypted for the destination's recipients if
+/// they differ, and is committed there before (for a move) it is removed
+/// and committed in the source, so a failure part way never loses it.
+fn move_across(
+    src: &mut Session,
+    src_arg: &str,
+    dest: &mut Session,
+    dest_arg: &str,
+    copy: bool,
+    force: bool,
+) -> Result<()> {
+    let from = src.resolve(src_arg);
+    let target = dest.resolve(dest_arg);
+    let landed = if dest.store.is_dir(&target) || dest_arg.ends_with('/') {
+        let name = from.rsplit('/').next().unwrap_or(&from);
+        store::resolve(&target, name)
+    } else {
+        target
+    };
+    let (src_name, dest_name) = (src.context.name.clone(), dest.context.name.clone());
+    let is_entry = src.store.is_entry(&from);
+    if from.is_empty() || (!is_entry && !src.store.is_dir(&from)) {
+        bail!(
+            "{src_name}:{} is not in the password store",
+            store::display(&from)
+        );
+    }
+    let pairs: Vec<(String, String)> = if is_entry {
+        if dest.store.is_dir(&landed) {
+            bail!("{dest_name}:{} is a folder", store::display(&landed));
+        }
+        vec![(from.clone(), landed.clone())]
+    } else {
+        if landed.is_empty() {
+            bail!(
+                "name a folder in {dest_name} to put {} in",
+                store::display_dir(&from)
+            );
+        }
+        if dest.store.is_entry(&landed) {
+            bail!("{dest_name}:{} is an entry", store::display(&landed));
+        }
+        src.store
+            .walk()
+            .into_iter()
+            .filter(|(p, is_dir)| !is_dir && p.starts_with(&format!("{from}/")))
+            .map(|(p, _)| {
+                let to = format!("{landed}{}", &p[from.len()..]);
+                (p, to)
+            })
+            .collect()
+    };
+    let clashes = pairs
+        .iter()
+        .filter(|(_, to)| dest.store.is_entry(to))
+        .count();
+    if clashes > 0 && !force {
+        let question = format!(
+            "{clashes} entr{} in {dest_name} would be overwritten. Go ahead?",
+            if clashes == 1 { "y" } else { "ies" }
+        );
+        if !confirm(&question)? {
+            return Ok(());
+        }
+    }
+    // A folder arriving somewhere new brings its own `.age-recipients`
+    // (and empty subfolders) along; entries are then rewritten as needed.
+    if !is_entry && !dest.store.is_dir(&landed) {
+        copy_tree(
+            &src.store.root().join(&from),
+            &dest.store.root().join(&landed),
+        )?;
+    }
+    for (from_path, to) in &pairs {
+        let before = recipient_set(&src.store, store::parent(from_path))?;
+        let after = recipient_set(&dest.store, store::parent(to))?;
+        let ciphertext = std::fs::read(src.store.entry_file(from_path))?;
+        if after == before {
+            dest.store
+                .write_file(&dest.store.entry_file(to), &ciphertext)?;
+        } else {
+            src.unlock()?;
+            let keys = src.keys.as_ref().expect("unlocked");
+            let plain = crypto::decrypt(keys, &ciphertext).with_context(|| {
+                format!("cannot decrypt {src_name}:{}", store::display(from_path))
+            })?;
+            dest.store.write_entry(to, &plain)?;
+        }
+        if let Some(size) = src.files.size(from_path) {
+            dest.files.insert(to, size);
+        }
+    }
+    let (from_file, landed_file) = if is_entry {
+        (entry_file(&from), entry_file(&landed))
+    } else {
+        (from.clone(), landed.clone())
+    };
+    let verb = if copy { "Copy" } else { "Move" };
+    dest.commit(
+        &[&landed_file],
+        &format!("{verb} {from} from {src_name} to {landed}."),
+    )?;
+    if copy {
+        return Ok(());
+    }
+    if is_entry {
+        std::fs::remove_file(src.store.entry_file(&from))?;
+    } else {
+        std::fs::remove_dir_all(src.store.root().join(&from))?;
+    }
+    src.store.remove_empty_dirs(store::parent(&from));
+    src.files.remove(&from);
+    src.commit(
+        &[&from_file],
+        &format!("Move {from} to {dest_name} as {landed}."),
+    )
+}
+
 /// Copy a folder and everything in it.
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to)?;
@@ -1263,8 +1481,11 @@ fn print_help() {
     );
     entry("edit <entry>", "edit in $VISUAL / $EDITOR");
     entry("rm [-r] [-f] <path>", "remove an entry or folder");
-    entry("mv [-f] <src> <dest>", "rename/move");
-    entry("cp [-f] <src> <dest>", "copy");
+    entry(
+        "mv [-f] <src> <dest>",
+        "rename/move; `work:/path` on either side is in another context",
+    );
+    entry("cp [-f] <src> <dest>", "copy, likewise");
     entry("find <terms>", "list entries whose names match");
     entry("grep [-i] <text>", "search inside entries");
     println!();

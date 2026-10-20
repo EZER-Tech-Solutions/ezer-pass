@@ -38,6 +38,12 @@ impl Store {
         Ok(Store { root })
     }
 
+    /// The store at `root` without checking it is there: for `context`,
+    /// which manages stores rather than using one.
+    pub fn unchecked(root: PathBuf) -> Self {
+        Store { root }
+    }
+
     /// Opens the store at `root`, making an empty one first if there is none.
     pub fn create(root: PathBuf) -> Result<Self> {
         fs::DirBuilder::new()

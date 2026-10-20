@@ -12,7 +12,8 @@ use zeroize::Zeroizing;
 /// Every command `run` understands, for completion and the TUI's command line.
 pub const COMMANDS: &[&str] = &[
     "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "reindex", "generate",
-    "edit", "rm", "mv", "cp", "find", "grep", "git", "init", "migrate", "help", "exit", "quit",
+    "edit", "rm", "mv", "cp", "find", "grep", "git", "init", "migrate", "context", "help", "exit",
+    "quit",
 ];
 
 pub struct Session {
@@ -31,6 +32,8 @@ pub struct Session {
 pub enum Outcome {
     Continue,
     Exit,
+    /// `context use` in an interactive session: work in this context now.
+    Switch(context::Context),
 }
 
 impl Session {
@@ -45,6 +48,19 @@ impl Session {
             files,
             keys: None,
         }
+    }
+
+    /// Work in `target` instead, keeping the identity unlocked if the two
+    /// share it, and remember it as the context to open next time.
+    pub fn switch(&mut self, target: context::Context) -> Result<()> {
+        let store = store::Store::open(target.path.clone())?;
+        let mut next = Session::new(target, store, self.interactive);
+        if next.context.identity().ok() == self.context.identity().ok() {
+            next.keys = self.keys.take();
+        }
+        *self = next;
+        context::remember(&self.context.name);
+        Ok(())
     }
 
     /// Unlock the identity if it isn't yet, asking for its passphrase on
@@ -307,6 +323,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             cmd_grep(sess, positional[0], ignore_case)?
         }
         "init" => setup::init(sess, args)?,
+        "context" => return cmd_context(sess, &positional),
         "migrate" => {
             expect_args(&positional, "migrate", 0, 0)?;
             setup::migrate(sess)?
@@ -320,6 +337,132 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         _ => bail!("unknown command {cmd:?} (try `help`)"),
     }
     Ok(Outcome::Continue)
+}
+
+const CONTEXT_USAGE: &str = "context [list | use <name> | add <name> [path] | rm <name> | rename <old> <new> | move <name> <path>]";
+
+/// `context`: list, switch, add, remove, rename or move contexts.
+fn cmd_context(sess: &mut Session, args: &[&str]) -> Result<Outcome> {
+    match args {
+        [] | ["list" | "ls"] => {
+            let contexts = context::load()?;
+            let width = contexts.iter().map(|c| c.name.len()).max().unwrap_or(0);
+            for c in &contexts {
+                let here = c.name == sess.context.name;
+                let name = format!("{:<width$}", c.name);
+                println!(
+                    "{} {}  {}{}{}",
+                    if here { "●".green() } else { " ".into() },
+                    if here {
+                        name.green().bold()
+                    } else {
+                        name.bold()
+                    },
+                    context::tilde(&c.path).dimmed(),
+                    if c.identity.is_some() {
+                        "  own key".cyan().to_string()
+                    } else {
+                        String::new()
+                    },
+                    if c.path.is_dir() {
+                        String::new()
+                    } else {
+                        "  (no store there)".red().to_string()
+                    },
+                );
+            }
+        }
+        ["use", name] => {
+            let target = context::find(name)?;
+            if sess.interactive {
+                return Ok(Outcome::Switch(target));
+            }
+            if !target.path.is_dir() {
+                bail!("{name}'s store isn't at {}", context::tilde(&target.path));
+            }
+            context::remember(name);
+            println!(
+                "ezer-pass now opens {} ({})",
+                name.green().bold(),
+                context::tilde(&target.path)
+            );
+        }
+        ["add", name] | ["add", name, _] => {
+            let path = args.get(2).map(|p| context::user_path(p)).transpose()?;
+            let target = context::create(name, path)?;
+            println!(
+                "added context {} at {}",
+                name.green().bold(),
+                context::tilde(&target.path)
+            );
+            init_store(sess, &target)?;
+            println!(
+                "{}",
+                format!("`context use {name}` switches to it; `-C {name}` uses it for one command")
+                    .dimmed()
+            );
+        }
+        ["rm", name] => {
+            if sess.interactive && *name == sess.context.name {
+                bail!("you are in {name}; `context use` another one first");
+            }
+            let target = context::find(name)?;
+            context::remove(name)?;
+            println!(
+                "removed context {name}; its store at {} is left as it is",
+                context::tilde(&target.path)
+            );
+        }
+        ["rename", old, new] => {
+            context::find(old)?;
+            context::rename(old, new)?;
+            if sess.context.name == *old {
+                sess.context.name = new.to_string();
+            }
+            println!("renamed context {old} to {}", new.green().bold());
+        }
+        ["move", name, path] => {
+            let target = context::find(name)?;
+            let to = context::user_path(path)?;
+            context::move_store(&target, &to)?;
+            if sess.context.name == *name {
+                sess.store = store::Store::open(to.clone())?;
+                sess.context.path = to.clone();
+            }
+            println!(
+                "moved {name}'s store to {}",
+                context::tilde(&to).green().bold()
+            );
+            if git::upstream(&to).is_some() {
+                println!(
+                    "{}",
+                    "its git remote is unchanged; other machines keep their own copy where it is"
+                        .dimmed()
+                );
+            }
+        }
+        _ => bail!("usage: {CONTEXT_USAGE}"),
+    }
+    Ok(Outcome::Continue)
+}
+
+/// Encrypt a new context's store to your key, as `init` would there,
+/// unless it already says who it is encrypted to.
+fn init_store(sess: &mut Session, target: &context::Context) -> Result<()> {
+    let store = store::Store::open(target.path.clone())?;
+    if store.uses_gpg() || store.root().join(store::RECIPIENTS).exists() {
+        return Ok(());
+    }
+    let mut other = Session::new(target.clone(), store, sess.interactive);
+    let shared = other.context.identity().ok() == sess.context.identity().ok();
+    if shared {
+        other.keys = sess.keys.take();
+    }
+    let result = setup::init(&mut other, &[]);
+    if shared {
+        sess.keys = other.keys.take();
+    }
+    result
 }
 
 /// List the contents of a store directory, or show a single entry.
@@ -1148,9 +1291,26 @@ fn print_help() {
         "migrate",
         "move a store made by `pass` from gpg to age, once",
     );
+    println!();
+    section("contexts (named stores: work, personal, ...)");
+    entry("context [list]", "list them; ● marks the one you are in");
+    entry(
+        "context use <name>",
+        "switch to one (and open it next time)",
+    );
+    entry(
+        "context add <name> [path]",
+        "add one, with a new store or the one at path",
+    );
+    entry(
+        "context rm <name>",
+        "forget one (its store is left as it is)",
+    );
+    entry("context rename <old> <new>", "give one another name");
+    entry("context move <name> <path>", "move one's store to path");
     entry(
         "-C <context> <command>",
-        "work in another context (named store); `-C <new> init` adds one",
+        "run one command in another context",
     );
     println!();
     section("version control");

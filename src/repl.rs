@@ -1,4 +1,5 @@
 use crate::commands::{self, COMMANDS, Outcome, Session};
+use crate::context::Context as StoreContext;
 use crate::{git, store};
 use colored::Colorize;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -10,6 +11,9 @@ use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Context, Editor, Helper};
 use std::borrow::Cow;
 use std::path::PathBuf;
+
+/// What `context` takes first.
+pub const CONTEXT_SUBCOMMANDS: &[&str] = &["list", "use", "add", "rm", "rename", "move"];
 
 struct EzerHelper {
     store: store::Store,
@@ -76,6 +80,30 @@ impl Completer for EzerHelper {
 
         // Arguments that name OS files rather than store paths.
         let arg_index = prior.len(); // 1-based position of the word being completed
+
+        if cmd == "context" {
+            let words: Vec<String> = match (arg_index, prior.get(1).copied()) {
+                (1, _) => CONTEXT_SUBCOMMANDS.iter().map(|s| s.to_string()).collect(),
+                (2, Some("use" | "rm" | "rename" | "move")) => crate::context::load()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| c.name)
+                    .collect(),
+                (2, Some("add")) => Vec::new(),
+                (3, Some("add" | "move")) => return self.filename.complete(line, pos, ctx),
+                _ => Vec::new(),
+            };
+            let matches = words
+                .into_iter()
+                .filter(|w| w.starts_with(word))
+                .map(|w| Pair {
+                    replacement: format!("{w} "),
+                    display: w,
+                })
+                .collect();
+            return Ok((word_start, matches));
+        }
+
         let os_path = match cmd {
             "import" => arg_index == 1,
             "export" => arg_index == 2,
@@ -104,13 +132,17 @@ impl Highlighter for EzerHelper {
             return Cow::Borrowed(prompt);
         }
         // "ezer:/path > " → color the name and path.
+        // "ezer[work]:/path > " → the context in its own color.
         match prompt
-            .strip_prefix("ezer:")
+            .strip_prefix("ezer")
             .and_then(|r| r.strip_suffix(" > "))
+            .and_then(|r| r.split_once(':'))
         {
-            Some(path) => Cow::Owned(format!(
-                "{}{}{} ",
-                "ezer:".green().bold(),
+            Some((tag, path)) => Cow::Owned(format!(
+                "{}{}{}{}{} ",
+                "ezer".green().bold(),
+                tag.yellow().bold(),
+                ":".green().bold(),
                 path.blue().bold(),
                 " >".dimmed()
             )),
@@ -163,35 +195,13 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         let _ = rl.load_history(path);
     }
 
-    let context = if sess.context.name == crate::context::DEFAULT {
-        String::new()
-    } else {
-        format!(" [{}]", sess.context.name.cyan())
-    };
     println!(
-        "{}{context} — exploring {} (`help` for commands)",
+        "{}{} — exploring {} (`help` for commands)",
         "ezer-pass".green().bold(),
+        context_tag(sess),
         sess.store.root().display()
     );
-
-    // If the store has an upstream, offer to pull any changes from it.
-    let upstream = git::upstream(sess.store.root());
-    if let Some(upstream) = &upstream {
-        if confirm(&mut rl, &format!("pull from {upstream}? [Y/n] ")) {
-            // --ff-only so a diverged store fails cleanly instead of dropping
-            // into an editor for a merge commit; sync failure must not block
-            // the session.
-            if git::interactive(sess.store.root(), &["pull", "--ff-only"]).is_err() {
-                eprintln!(
-                    "{}",
-                    "warning: git pull failed — continuing unsynced (resolve with `git ...`)"
-                        .yellow()
-                );
-            }
-        } else {
-            println!("{}", "not pulled (pull later with `git pull`)".dimmed());
-        }
-    }
+    offer_pull(&mut rl, sess);
 
     // Main interactive loop: read a line, tokenize it, and run the command.
     loop {
@@ -201,7 +211,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         }
 
         // Output the prompt with the current working directory, and read a line of input from the user.
-        let prompt = format!("ezer:{} > ", store::display(&sess.cwd));
+        let prompt = format!("ezer{}:{} > ", context_tag(sess), store::display(&sess.cwd));
         match rl.readline(&prompt) {
             Ok(line) => {
                 // Trim whitespace from the line and skip empty lines.
@@ -226,6 +236,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
                 match result {
                     Ok(Outcome::Continue) => {}
                     Ok(Outcome::Exit) => break,
+                    Ok(Outcome::Switch(target)) => switch(&mut rl, sess, target),
                     Err(e) => eprintln!("{} {e:#}", "error:".red().bold()),
                 }
             }
@@ -238,9 +249,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
     }
 
     // On exit, offer to push any local commits to the store's upstream.
-    if let Some(upstream) = &upstream {
-        offer_push(&mut rl, sess, upstream);
-    }
+    offer_push(&mut rl, sess);
 
     // Save the command history to the history file.
     if let Some(path) = &history {
@@ -258,8 +267,76 @@ fn confirm(rl: &mut Editor<EzerHelper, FileHistory>, prompt: &str) -> bool {
     )
 }
 
-/// On exit, offer to push any local commits to the store's upstream.
-fn offer_push(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session, upstream: &str) {
+/// `[work]` outside the default context, so the prompt says which store
+/// you are in.
+fn context_tag(sess: &Session) -> String {
+    if sess.context.name == crate::context::DEFAULT {
+        String::new()
+    } else {
+        format!("[{}]", sess.context.name)
+    }
+}
+
+/// `context use`: offer to push what this store hasn't, then carry on in
+/// `target`, offering to pull it.
+fn switch(rl: &mut Editor<EzerHelper, FileHistory>, sess: &mut Session, target: StoreContext) {
+    if target.name == sess.context.name {
+        println!("already in {}", target.name);
+        return;
+    }
+    if !target.path.is_dir() {
+        eprintln!(
+            "{} {}'s store isn't at {}",
+            "error:".red().bold(),
+            target.name,
+            crate::context::tilde(&target.path)
+        );
+        return;
+    }
+    offer_push(rl, sess);
+    if let Err(e) = sess.switch(target) {
+        eprintln!("{} {e:#}", "error:".red().bold());
+        return;
+    }
+    if let Some(helper) = rl.helper_mut()
+        && let Ok(store) = store::Store::open(sess.store.root().to_path_buf())
+    {
+        helper.store = store;
+    }
+    println!(
+        "switched to {} — {}",
+        sess.context.name.green().bold(),
+        sess.store.root().display()
+    );
+    offer_pull(rl, sess);
+}
+
+/// If the store has an upstream, offer to pull any changes from it.
+fn offer_pull(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session) {
+    let Some(upstream) = git::upstream(sess.store.root()) else {
+        return;
+    };
+    if confirm(rl, &format!("pull from {upstream}? [Y/n] ")) {
+        // --ff-only so a diverged store fails cleanly instead of dropping
+        // into an editor for a merge commit; sync failure must not block
+        // the session.
+        if git::interactive(sess.store.root(), &["pull", "--ff-only"]).is_err() {
+            eprintln!(
+                "{}",
+                "warning: git pull failed — continuing unsynced (resolve with `git ...`)".yellow()
+            );
+        }
+    } else {
+        println!("{}", "not pulled (pull later with `git pull`)".dimmed());
+    }
+}
+
+/// Offer to push any local commits to the store's upstream (on exit, and
+/// before switching contexts).
+fn offer_push(rl: &mut Editor<EzerHelper, FileHistory>, sess: &Session) {
+    let Some(upstream) = git::upstream(sess.store.root()) else {
+        return;
+    };
     let ahead = git::ahead_count(sess.store.root());
     if ahead == 0 {
         return;

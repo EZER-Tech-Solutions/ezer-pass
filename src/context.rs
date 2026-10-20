@@ -9,11 +9,13 @@
 //! identity = ~/.config/ezer-pass/work.age
 //! ```
 //!
-//! `default` is always there: `$PASSWORD_STORE_DIR` or `~/.password-store`,
-//! unless the file gives it another path.
+//! `default` is always there: `$PASSWORD_STORE_DIR` if set, else the path
+//! the file gives it, else `~/.password-store` if one exists (a store from
+//! before contexts, or from `pass`), else `$XDG_DATA_HOME/ezer-pass/default`.
 
 use anyhow::{Context as _, Result, bail};
 use std::fs;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT: &str = "default";
@@ -69,10 +71,14 @@ pub fn new_path(name: &str) -> Result<PathBuf> {
 }
 
 fn default_path() -> Result<PathBuf> {
-    match std::env::var_os("PASSWORD_STORE_DIR") {
-        Some(dir) => Ok(PathBuf::from(dir)),
-        None => Ok(home()?.join(".password-store")),
+    if let Some(dir) = std::env::var_os("PASSWORD_STORE_DIR") {
+        return Ok(PathBuf::from(dir));
     }
+    let legacy = home()?.join(".password-store");
+    if legacy.is_dir() {
+        return Ok(legacy);
+    }
+    new_path(DEFAULT)
 }
 
 /// `~/x` with the home directory filled in.
@@ -81,6 +87,17 @@ pub fn expand(path: &str) -> Result<PathBuf> {
         Some(rest) => Ok(home()?.join(rest)),
         None if path == "~" => home(),
         None => Ok(PathBuf::from(path)),
+    }
+}
+
+/// A path typed by the user: `~` expanded, and a relative one taken from
+/// the current directory.
+pub fn user_path(path: &str) -> Result<PathBuf> {
+    let path = expand(path)?;
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 
@@ -199,31 +216,26 @@ pub fn find(name: &str) -> Result<Context> {
     }
 }
 
-/// Add a context to the file. `path` defaults to `new_path(name)`.
-pub fn add(name: &str, path: Option<PathBuf>) -> Result<Context> {
+fn check_new_name(name: &str) -> Result<()> {
     if !valid_name(name) {
         bail!("{name:?} is not a context name (letters, digits, - and _)");
     }
     if load()?.iter().any(|c| c.name == name) {
         bail!("there is already a context named {name}");
     }
+    Ok(())
+}
+
+/// Add a context to the file. `path` defaults to `new_path(name)`.
+pub fn add(name: &str, path: Option<PathBuf>) -> Result<Context> {
+    check_new_name(name)?;
     let path = match path {
         Some(p) => p,
         None => new_path(name)?,
     };
-    let file = contexts_file()?;
-    let mut text = fs::read_to_string(&file).unwrap_or_default();
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    if !text.is_empty() {
-        text.push('\n');
-    }
-    text.push_str(&format!("[{name}]\npath = {}\n", tilde(&path)));
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    }
-    fs::write(&file, text).with_context(|| format!("cannot write {}", file.display()))?;
+    let mut lines = read_lines()?;
+    append_section(&mut lines, name, &path);
+    write_lines(&lines)?;
     Ok(Context {
         name: name.into(),
         path,
@@ -231,8 +243,160 @@ pub fn add(name: &str, path: Option<PathBuf>) -> Result<Context> {
     })
 }
 
+/// `add`, then make the store's folder if it isn't there.
+pub fn create(name: &str, path: Option<PathBuf>) -> Result<Context> {
+    let ctx = add(name, path)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&ctx.path)
+        .with_context(|| format!("cannot create {}", tilde(&ctx.path)))?;
+    Ok(ctx)
+}
+
+/// Take a context out of the file. Its store is left where it is.
+pub fn remove(name: &str) -> Result<()> {
+    if name == DEFAULT {
+        bail!("default can't be removed");
+    }
+    let mut lines = read_lines()?;
+    let (start, end) = section(&lines, name)?;
+    lines.drain(start..end);
+    write_lines(&lines)?;
+    for state in ["recent"] {
+        if let Some(file) = state_file(name, state) {
+            let _ = fs::remove_file(file);
+        }
+    }
+    if remembered().as_deref() == Some(name) {
+        remember(DEFAULT);
+    }
+    Ok(())
+}
+
+/// Give a context another name, carrying its recents along.
+pub fn rename(old: &str, new: &str) -> Result<()> {
+    if old == DEFAULT || new == DEFAULT {
+        bail!("default can't be renamed");
+    }
+    check_new_name(new)?;
+    let mut lines = read_lines()?;
+    let (start, _) = section(&lines, old)?;
+    lines[start] = format!("[{new}]");
+    write_lines(&lines)?;
+    for state in ["recent"] {
+        if let (Some(from), Some(to)) = (state_file(old, state), state_file(new, state)) {
+            let _ = fs::rename(from, to);
+        }
+    }
+    if remembered().as_deref() == Some(old) {
+        remember(new);
+    }
+    Ok(())
+}
+
+/// Move a context's store to `to` and point the context at it.
+pub fn move_store(ctx: &Context, to: &Path) -> Result<()> {
+    if ctx.name == DEFAULT && std::env::var_os("PASSWORD_STORE_DIR").is_some() {
+        bail!(
+            "$PASSWORD_STORE_DIR picks default's store; move it yourself and change the variable"
+        );
+    }
+    if !ctx.path.is_dir() {
+        bail!("{}'s store isn't at {}", ctx.name, tilde(&ctx.path));
+    }
+    if to.exists() {
+        bail!("{} already exists", tilde(to));
+    }
+    if to.starts_with(&ctx.path) {
+        bail!("can't move a store into itself");
+    }
+    if let Some(dir) = to.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("cannot create {}", tilde(dir)))?;
+    }
+    fs::rename(&ctx.path, to).with_context(|| {
+        format!(
+            "cannot move {} to {} (on another filesystem, move it yourself and set `path` in {})",
+            tilde(&ctx.path),
+            tilde(to),
+            contexts_file().map_or_else(|_| "the contexts file".into(), |f| tilde(&f))
+        )
+    })?;
+    let mut lines = read_lines()?;
+    match section(&lines, &ctx.name) {
+        Ok((start, end)) => {
+            let line = format!("path = {}", tilde(to));
+            match (start + 1..end).find(|&i| {
+                lines[i]
+                    .split_once('=')
+                    .is_some_and(|(k, _)| k.trim() == "path")
+            }) {
+                Some(i) => lines[i] = line,
+                None => lines.insert(start + 1, line),
+            }
+        }
+        // Only default can be missing from the file.
+        Err(_) => append_section(&mut lines, &ctx.name, to),
+    }
+    write_lines(&lines)
+}
+
+fn read_lines() -> Result<Vec<String>> {
+    let file = contexts_file()?;
+    match fs::read_to_string(&file) {
+        Ok(text) => Ok(text.lines().map(str::to_string).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", file.display())),
+    }
+}
+
+fn write_lines(lines: &[String]) -> Result<()> {
+    let file = contexts_file()?;
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    // No run of blank lines left behind where a section was taken out.
+    while text.contains("\n\n\n") {
+        text = text.replace("\n\n\n", "\n\n");
+    }
+    let text = text.trim_start_matches('\n');
+    fs::write(&file, text).with_context(|| format!("cannot write {}", file.display()))
+}
+
+fn append_section(lines: &mut Vec<String>, name: &str, path: &Path) {
+    if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+        lines.push(String::new());
+    }
+    lines.push(format!("[{name}]"));
+    lines.push(format!("path = {}", tilde(path)));
+}
+
+/// The lines of `name`'s section: its header up to the next header.
+fn section(lines: &[String], name: &str) -> Result<(usize, usize)> {
+    let header = |l: &str| {
+        l.trim()
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+            .map(|n| n.trim().to_string())
+    };
+    let start = lines
+        .iter()
+        .position(|l| header(l).as_deref() == Some(name))
+        .with_context(|| format!("no context named {name:?} in the contexts file"))?;
+    let end = (start + 1..lines.len())
+        .find(|&i| header(&lines[i]).is_some())
+        .unwrap_or(lines.len());
+    Ok((start, end))
+}
+
 /// The context to open: `-C`/`$EZER_PASS_CONTEXT` if given, else the one
-/// last picked in the TUI. With `$PASSWORD_STORE_DIR` set and nothing
+/// last switched to. With `$PASSWORD_STORE_DIR` set and nothing
 /// named, `default` (its store), so a throwaway store isn't overruled.
 pub fn current(named: Option<&str>) -> Result<Context> {
     let env = std::env::var("EZER_PASS_CONTEXT")
@@ -244,14 +408,19 @@ pub fn current(named: Option<&str>) -> Result<Context> {
     if std::env::var_os("PASSWORD_STORE_DIR").is_some() {
         return find(DEFAULT);
     }
-    let last = crate::repl::state_file("context")
-        .and_then(|p| fs::read_to_string(p).ok())
-        .map(|s| s.trim().to_string());
-    match last {
+    match remembered() {
         // A context removed from the file since falls back to default.
-        Some(name) if !name.is_empty() => find(&name).or_else(|_| find(DEFAULT)),
-        _ => find(DEFAULT),
+        Some(name) => find(&name).or_else(|_| find(DEFAULT)),
+        None => find(DEFAULT),
     }
+}
+
+/// The context last switched to, if any.
+pub fn remembered() -> Option<String> {
+    crate::repl::state_file("context")
+        .and_then(|p| fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Remember `name` as the context to open next time.
@@ -295,6 +464,17 @@ mod tests {
         assert!(parse("[a]\npath = /x\n[a]\npath = /y\n").is_err());
         assert!(parse("[a b]\npath = /x\n").is_err());
         assert!(parse("[a]\ncolor = red\n").is_err());
+    }
+
+    #[test]
+    fn finds_sections() {
+        let lines: Vec<String> = "# top\n[a]\npath = /a\n\n[b]\npath = /b\n"
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(section(&lines, "a").unwrap(), (1, 4));
+        assert_eq!(section(&lines, "b").unwrap(), (4, 6));
+        assert!(section(&lines, "c").is_err());
     }
 
     #[test]

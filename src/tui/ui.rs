@@ -1331,6 +1331,10 @@ fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selecte
                 spans.push(format!("{usage:<35}").dim());
                 spans.push(spec.desc.into());
             }
+            palette::Item::Word { label, note } => {
+                spans.push(format!("{label:<9}").fg(ACCENT).bold());
+                spans.push(note.clone().dim());
+            }
             palette::Item::Path { label, is_dir } => {
                 if *is_dir {
                     spans.push(folder_icon(false).fg(DIR));

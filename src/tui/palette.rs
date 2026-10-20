@@ -13,6 +13,8 @@ pub enum Arg {
     Path,
     /// Folders only.
     Dir,
+    /// `context`'s subcommands, then context names.
+    Context,
 }
 
 pub struct Spec {
@@ -79,6 +81,12 @@ pub const SPECS: &[Spec] = &[
         "set who a folder is encrypted to",
         Arg::None,
     ),
+    spec(
+        "context",
+        "[list|use|add|rm|rename|move] [name]",
+        "switch, add or manage contexts",
+        Arg::Context,
+    ),
     spec("pwd", "", "show the current folder", Arg::None),
     spec("help", "", "list the keys", Arg::None),
     spec("quit", "", "leave (offers to push)", Arg::None),
@@ -93,12 +101,30 @@ const fn spec(name: &'static str, usage: &'static str, desc: &'static str, arg: 
     }
 }
 
+/// `context`'s subcommands, as the palette offers them.
+const CONTEXT_WORDS: &[(&str, &str)] = &[
+    ("use", "<name>  switch to a context"),
+    ("list", "list contexts"),
+    (
+        "add",
+        "<name> [path]  add one, with a new store or the one at path",
+    ),
+    ("rm", "<name>  forget one (its store stays)"),
+    ("rename", "<old> <new>  give one another name"),
+    ("move", "<name> <path>  move one's store"),
+];
+
 pub fn find(name: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.name == name)
 }
 
 pub enum Item {
     Command(&'static Spec),
+    /// A word to complete to (a subcommand, a context's name), with a note.
+    Word {
+        label: String,
+        note: String,
+    },
     /// A store path to complete to; `label` is what was typed plus the
     /// rest of the name.
     Path {
@@ -146,7 +172,33 @@ pub fn suggest(text: &str, store: &Store, cwd: &str) -> Palette {
     // The word being typed: everything after the last space.
     let start = text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
     let word = &text[start..];
-    if let Some(spec) = command
+    if command.is_some_and(|s| s.arg == Arg::Context) {
+        let before: Vec<&str> = text[..start].split_whitespace().collect();
+        let words: Vec<(String, String)> = match (before.len(), before.get(1).copied()) {
+            (1, _) => CONTEXT_WORDS
+                .iter()
+                .map(|(w, note)| (w.to_string(), note.to_string()))
+                .collect(),
+            (2, Some("use" | "rm" | "rename" | "move")) => crate::context::load()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| (c.name, crate::context::tilde(&c.path)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut ranked: Vec<(i64, usize, String, String)> = words
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, (w, note))| fuzzy::score(word, &w).map(|s| (s, i, w, note)))
+            .collect();
+        ranked.sort_by_key(|r| (-r.0, r.1));
+        for (_, _, label, note) in ranked {
+            items.push(Suggestion {
+                line: format!("{}{label} ", &text[..start]),
+                item: Item::Word { label, note },
+            });
+        }
+    } else if let Some(spec) = command
         && spec.arg != Arg::None
         && !word.starts_with('-')
     {
@@ -189,6 +241,15 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    #[test]
+    fn context_words_match_the_command() {
+        let words: Vec<&str> = CONTEXT_WORDS.iter().map(|w| w.0).collect();
+        for w in crate::repl::CONTEXT_SUBCOMMANDS {
+            assert!(words.contains(w), "{w} is missing from the palette");
+        }
+        assert_eq!(words.len(), crate::repl::CONTEXT_SUBCOMMANDS.len());
     }
 
     #[test]

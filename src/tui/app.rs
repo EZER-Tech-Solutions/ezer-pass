@@ -13,7 +13,6 @@ use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::collections::HashSet;
-use std::os::unix::fs::DirBuilderExt;
 use std::time::{Duration, Instant};
 
 /// How many recently used entries the bottom pane keeps (and `1`-`5` copy).
@@ -677,6 +676,8 @@ impl App {
     }
 
     pub fn finish_run(&mut self, batch: &Batch, done: usize, result: Result<()>) {
+        // `:context` may have added, renamed or moved one.
+        self.count_contexts();
         self.reload_files();
         for job in &batch.jobs[..done] {
             if let Some((from, to)) = &job.moved {
@@ -1125,19 +1126,9 @@ impl App {
             None => (text, None),
         };
         let result = path
-            .map(context::expand)
+            .map(context::user_path)
             .transpose()
-            .and_then(|path| context::add(name, path))
-            .and_then(|ctx| {
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(&ctx.path)
-                    .map_err(|e| {
-                        anyhow::anyhow!("cannot create {}: {e}", context::tilde(&ctx.path))
-                    })?;
-                Ok(ctx)
-            });
+            .and_then(|path| context::create(name, path));
         match result {
             Ok(ctx) => self.request_switch(ctx),
             Err(e) => picker.error = Some(format!("{e:#}")),
@@ -1166,17 +1157,10 @@ impl App {
     /// dropped, since their paths belong to the old store.
     fn switch(&mut self, target: Context) {
         self.mode = Mode::Browse;
-        let store = match store::Store::open(target.path.clone()) {
-            Ok(store) => store,
-            Err(e) => return self.error(format!("{e:#}")),
-        };
-        let mut sess = Session::new(target, store, true);
-        if sess.context.identity().ok() == self.sess.context.identity().ok() {
-            sess.keys = self.sess.keys.take();
+        if let Err(e) = self.sess.switch(target) {
+            return self.error(format!("{e:#}"));
         }
-        let name = sess.context.name.clone();
-        context::remember(&name);
-        self.sess = sess;
+        let name = self.sess.context.name.clone();
         self.recent = load_recent(&self.sess);
         self.last_copy = None;
         self.expanded.clear();
@@ -1846,6 +1830,13 @@ impl App {
                 } else {
                     Effect::Decrypt(path)
                 };
+            }
+            // Switch here, offering a push first, rather than in `commands`.
+            "context" if positional.first() == Some(&"use") && positional.len() == 2 => {
+                match context::find(positional[1]) {
+                    Ok(target) => self.request_switch(target),
+                    Err(e) => self.error(format!("{e:#}")),
+                }
             }
             _ if COMMANDS.contains(&cmd) => {
                 // Quiet commands return straight to the TUI; anything that

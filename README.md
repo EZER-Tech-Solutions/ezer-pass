@@ -28,6 +28,10 @@ cargo install --path .
 ezer-pass init        # makes your identity (asks for a passphrase) and the store
 ```
 
+The store lives in `~/.local/share/ezer-pass/default`. If you already have a
+`~/.password-store` (from `pass`, or an older ezer-pass), it is used where it
+is; `ezer-pass context move default ~/.local/share/ezer-pass/default` moves it.
+
 Copying to the clipboard needs `wl-copy`/`wl-paste` (Wayland) or `xclip` (X11);
 sync and history need `git`.
 
@@ -38,7 +42,7 @@ Coming from `pass`? See [Moving from pass](#moving-from-pass).
 Run `ezer-pass` with no arguments:
 
 ```
-╭ ezer-pass  ──────────────────────────────────────────── ~/.password-store ╮
+╭ ezer-pass  ───────────────────────────── ~/.local/share/ezer-pass/default ╮
 │   ▼ servers/                                                              │
 │▌  ├─▶ prod/                                                               │
 │▌✂ ├─• web1                                                                │
@@ -104,7 +108,7 @@ Run `ezer-pass repl` for the line-based explorer:
 
 ```
 $ ezer-pass repl
-ezer-pass — exploring /home/you/.password-store (`help` for commands)
+ezer-pass — exploring /home/you/.local/share/ezer-pass/default (`help` for commands)
 ezer:/ > ls
 apple/
 servers/
@@ -149,6 +153,7 @@ hunter2
 | `init [-p folder] [age1...]` | make your identity if needed; set who a folder is encrypted to |
 | `migrate` | move a `pass` store from gpg to age, once |
 | `git <git-args>` | run git in the store (`git init`, `git log`, `git remote add`, ...) |
+| `context [list\|use\|add\|rm\|rename\|move]` | list and manage contexts (named stores); see [Contexts](#contexts) |
 
 Every command also works one-shot from your shell with the same syntax:
 `ezer-pass show servers/web1`, `ezer-pass import cert.pem servers/cert`.
@@ -162,7 +167,7 @@ different place, and switch between them without leaving the TUI.
 ```
 ╭ contexts ──────────────────────────────────────────────╮
 │                                                        │
-│    default   ~/.password-store                         │
+│    default   ~/.local/share/ezer-pass/default          │
 │  ▌● work     ~/.local/share/ezer-pass/work             │
 │    client    ~/clients/acme-store  own key             │
 │                                                        │
@@ -181,9 +186,28 @@ different place, and switch between them without leaving the TUI.
   `EZER_PASS_CONTEXT=<name>`) picks the context for one command:
   `ezer-pass -C work show vpn`. `ezer-pass -C <new name> init` adds a context
   the same way `n` does.
-- Without either, ezer-pass opens the context you last picked in the TUI.
-  `default` is `~/.password-store` (or `$PASSWORD_STORE_DIR`, which always
-  opens `default` unless a context is named).
+- Without either, ezer-pass opens the context you last switched to (in the TUI,
+  explore mode or with `context use`). `$PASSWORD_STORE_DIR` always opens
+  `default` unless a context is named.
+- `default` is always there. Its store is `$PASSWORD_STORE_DIR` if set, else
+  the path the contexts file gives it, else `~/.password-store` if that exists,
+  else `~/.local/share/ezer-pass/default`.
+
+The `context` command manages them, one-shot, in explore mode or on the TUI's
+`:` line (where the palette suggests subcommands and names):
+
+| Command | Description |
+|---|---|
+| `context` / `context list` | list contexts; `●` marks the one you are in |
+| `context use <name>` | switch to it (in the TUI and explore mode, offering to push the store you leave); from the shell, make it the one ezer-pass opens |
+| `context add <name> [path]` | add one: a new store in `~/.local/share/ezer-pass/<name>`, or the store at `path` (made if it isn't there); a new store is encrypted to your key |
+| `context rm <name>` | forget one; its store is left where it is |
+| `context rename <old> <new>` | give one another name (its store stays where it is) |
+| `context move <name> <path>` | move its store to `path` and point the context there; a git remote is unaffected |
+
+Explore mode's prompt names the context outside `default`: `ezer[work]:/ >`.
+If the store of the context you last used has gone missing,
+`ezer-pass context use default` goes back.
 
 Contexts are listed in `~/.config/ezer-pass/contexts`, which you can edit:
 
@@ -220,7 +244,7 @@ in `~/.config/ezer-pass/identity.age`, encrypted with your passphrase.
   be read. To use the store on another machine, copy the identity there and
   clone the store.
 - The files are standard age, so the `age` command line reads them too:
-  `age -d -i ~/.config/ezer-pass/identity.age ~/.password-store/site.age`.
+  `age -d -i ~/.config/ezer-pass/identity.age ~/.local/share/ezer-pass/default/site.age`.
 
 ## Moving from pass
 
@@ -346,14 +370,14 @@ refused without `--force` — a password store is a poor home for large blobs.
 
 | Variable | Effect |
 |---|---|
-| `PASSWORD_STORE_DIR` | the `default` context's store (default `~/.password-store`), same as pass |
-| `EZER_PASS_CONTEXT` | context to open, like `-C` (default: the one last picked in the TUI) |
+| `PASSWORD_STORE_DIR` | the `default` context's store (default `~/.local/share/ezer-pass/default`, or `~/.password-store` if it exists), same as pass |
+| `EZER_PASS_CONTEXT` | context to open, like `-C` (default: the one last switched to) |
 | `EZER_PASS_IDENTITY` | identity file for every context (default `$XDG_CONFIG_HOME/ezer-pass/identity.age`, or a context's own) |
 | `PASSWORD_STORE_CLIP_TIME` | seconds a copied password stays on the clipboard, and before a revealed one re-masks in the TUI (default 45) |
 | `PASSWORD_STORE_GENERATED_LENGTH` | default length for `generate` (default 25) |
 | `VISUAL` / `EDITOR` | editor for `edit` (default `vi`) |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |
-| `XDG_DATA_HOME` | where new contexts' stores go (default `~/.local/share`) |
+| `XDG_DATA_HOME` | where stores go (default `~/.local/share`) |
 | `EZER_PASS_ICONS` | `plain` draws folders as `▶`/`▼` instead of Nerd Font folder icons, for fonts without them |
 
 ## Development

@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     // `init` on a context that doesn't exist yet adds it, with its store in
     // `$XDG_DATA_HOME/ezer-pass/<name>`.
     let command = args.first().map(String::as_str);
-    let opened = open(named.as_deref(), command == Some("init"));
+    let opened = open(named.as_deref(), command);
     let (context, store) = match opened {
         Ok(opened) => opened,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> ExitCode {
         }
     };
     // A store made by `pass` is unreadable until it is moved to age.
-    if store.uses_gpg() && !matches!(command, Some("migrate" | "git" | "help")) {
+    if store.uses_gpg() && !matches!(command, Some("migrate" | "git" | "help" | "context")) {
         eprintln!(
             "ezer-pass: this store is still encrypted with gpg — run `ezer-pass migrate` to move it to age (gpg asks for your passphrase one last time)"
         );
@@ -121,7 +121,11 @@ fn take_context_flag(args: &mut Vec<String>) -> anyhow::Result<Option<String>> {
 }
 
 /// The context to work in and its store.
-fn open(named: Option<&str>, init: bool) -> anyhow::Result<(context::Context, store::Store)> {
+fn open(
+    named: Option<&str>,
+    command: Option<&str>,
+) -> anyhow::Result<(context::Context, store::Store)> {
+    let init = command == Some("init");
     let context = match context::current(named) {
         Ok(context) => context,
         Err(_) if init && named.is_some() => {
@@ -132,10 +136,20 @@ fn open(named: Option<&str>, init: bool) -> anyhow::Result<(context::Context, st
         }
         Err(e) => return Err(e),
     };
-    let store = if init {
-        store::Store::create(context.path.clone())?
-    } else {
-        store::Store::open(context.path.clone())?
+    let store = match command {
+        Some("init") => store::Store::create(context.path.clone())?,
+        // `context use default` must work even when this store is gone.
+        Some("context") => store::Store::unchecked(context.path.clone()),
+        _ => store::Store::open(context.path.clone()).map_err(|e| {
+            if context.name == context::DEFAULT || named.is_some() {
+                e
+            } else {
+                e.context(format!(
+                    "in context {} (`ezer-pass context use default` goes back)",
+                    context.name
+                ))
+            }
+        })?,
     };
     Ok((context, store))
 }

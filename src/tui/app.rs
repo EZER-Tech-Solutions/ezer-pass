@@ -4,14 +4,16 @@ use super::history::{self, History};
 use super::palette;
 use super::sync::{Op, Sync};
 use crate::commands::{self, COMMANDS, Session};
+use crate::context::{self, Context};
 use crate::crypto::{self, WrongPassphrase};
 use crate::password::Spec;
-use crate::{clipboard, fileio, git, index, repl, store};
+use crate::{clipboard, fileio, git, index, store};
 use age::secrecy::SecretString;
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::collections::HashSet;
+use std::os::unix::fs::DirBuilderExt;
 use std::time::{Duration, Instant};
 
 /// How many recently used entries the bottom pane keeps (and `1`-`5` copy).
@@ -151,6 +153,16 @@ pub enum Confirm {
     Push { ahead: u64 },
 }
 
+/// The `C` popup: every context, to switch to or add to.
+pub struct Picker {
+    pub contexts: Vec<Context>,
+    pub list: ListState,
+    /// Typing a new context: its name, then optionally an existing store's
+    /// path.
+    pub adding: Option<Input>,
+    pub error: Option<String>,
+}
+
 pub enum Mode {
     Browse,
     /// Typing into the `/` filter.
@@ -171,6 +183,8 @@ pub enum Mode {
     History(Box<History>),
     /// Asking for the identity's passphrase.
     Unlock(Unlock),
+    /// Picking a context (`C`).
+    Contexts(Picker),
 }
 
 pub struct Status {
@@ -204,21 +218,20 @@ pub struct App {
     history_pos: Option<usize>,
     /// The highlighted command-palette suggestion.
     pub palette_sel: usize,
+    /// The context to switch to once the push it waits on is done (or
+    /// declined), instead of quitting.
+    pub switch_to: Option<Context>,
+    /// Work to do on the next turn of the event loop (a new context's
+    /// `init`), whichever way it was queued.
+    pub next: Option<Effect>,
+    /// Name the context in the header: there is more than one.
+    pub show_context: bool,
 }
 
 impl App {
     pub fn new(sess: Session) -> Self {
         let clip_time = clipboard::clear_after();
-        let recent = repl::state_file("recent")
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| {
-                s.lines()
-                    .filter(|p| sess.store.is_entry(p))
-                    .take(RECENT_MAX)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let recent = load_recent(&sess);
         let mut app = App {
             sess,
             rows: Vec::new(),
@@ -240,7 +253,11 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             palette_sel: 0,
+            switch_to: None,
+            next: None,
+            show_context: false,
         };
+        app.count_contexts();
         app.refresh_git();
         if app.upstream.is_some() {
             app.mode = Mode::Confirm(Confirm::Pull);
@@ -414,10 +431,10 @@ impl App {
         self.save_recent();
     }
 
-    /// Persist recents so `1`-`5` work across sessions. Store paths only;
-    /// the store doesn't encrypt names either.
+    /// Persist recents so `1`-`5` work across sessions, one list per
+    /// context. Store paths only; the store doesn't encrypt names either.
     fn save_recent(&self) {
-        if let Some(path) = repl::state_file("recent") {
+        if let Some(path) = context::state_file(&self.sess.context.name, "recent") {
             let _ = std::fs::write(path, self.recent.join("\n") + "\n");
         }
     }
@@ -460,7 +477,7 @@ impl App {
                     };
                     self.finish_sync(&what, Ok(()));
                 }
-                Op::Push => self.quit = true,
+                Op::Push => self.after_push(None),
             }
         }
     }
@@ -715,6 +732,7 @@ impl App {
             Mode::Sync(_) => self.sync_key(key),
             Mode::History(_) => self.history_key(key),
             Mode::Unlock(_) => self.unlock_key(key),
+            Mode::Contexts(_) => self.contexts_key(key),
         }
     }
 
@@ -725,7 +743,14 @@ impl App {
         if self.sess.keys.is_some() || !effect.needs_keys() {
             return effect;
         }
-        match crypto::needs_passphrase() {
+        let identity = match self.sess.context.identity() {
+            Ok(path) => path,
+            Err(e) => {
+                self.error(format!("{e:#}"));
+                return Effect::None;
+            }
+        };
+        match crypto::needs_passphrase(&identity) {
             Ok(true) => {
                 self.mode = Mode::Unlock(Unlock {
                     input: Input::default(),
@@ -735,7 +760,7 @@ impl App {
                 });
                 Effect::None
             }
-            Ok(false) => match crypto::unlock(None) {
+            Ok(false) => match crypto::unlock(&identity, None) {
                 Ok(keys) => {
                     self.sess.keys = Some(keys);
                     effect
@@ -779,7 +804,15 @@ impl App {
             return Effect::None;
         };
         let passphrase = SecretString::from(std::mem::take(&mut u.input).text);
-        match crypto::unlock(Some(&passphrase)) {
+        let result = self
+            .sess
+            .context
+            .identity()
+            .and_then(|identity| crypto::unlock(&identity, Some(&passphrase)));
+        let Mode::Unlock(u) = &mut self.mode else {
+            return Effect::None;
+        };
+        match result {
             Ok(keys) => {
                 self.sess.keys = Some(keys);
                 let Mode::Unlock(u) = std::mem::replace(&mut self.mode, Mode::Browse) else {
@@ -971,13 +1004,13 @@ impl App {
                 Effect::None
             }
             (Op::Push, KeyCode::Char('q')) => {
-                self.exit_warning =
-                    Some("warning: git push failed — your commits are still local".into());
-                self.quit = true;
+                self.mode = Mode::Browse;
+                self.after_push(Some(anyhow::anyhow!("git push failed")));
                 Effect::None
             }
             (Op::Push, KeyCode::Esc) => {
                 self.mode = Mode::Browse;
+                self.switch_to = None;
                 self.refresh_git();
                 self.error("not pushed — q to try again, or `:git push`");
                 Effect::None
@@ -988,6 +1021,191 @@ impl App {
             }
             _ => Effect::None,
         }
+    }
+
+    /// Whether the header should name the context.
+    fn count_contexts(&mut self) {
+        self.show_context = self.sess.context.name != context::DEFAULT
+            || context::load().is_ok_and(|c| c.len() > 1);
+    }
+
+    /// Once a push is done, failed (`error`) or declined: switch to the
+    /// context waiting on it, or quit.
+    pub fn after_push(&mut self, error: Option<anyhow::Error>) {
+        let Some(target) = self.switch_to.take() else {
+            if let Some(e) = error {
+                self.exit_warning = Some(format!("warning: {e:#} — your commits are still local"));
+            }
+            self.quit = true;
+            return;
+        };
+        let left = self.sess.context.name.clone();
+        self.switch(target);
+        if let Some(e) = error {
+            self.error(format!("{e:#} — your commits in {left} are still local"));
+        }
+    }
+
+    fn open_contexts(&mut self) {
+        match context::load() {
+            Ok(contexts) => {
+                let mut list = ListState::default();
+                let here = contexts
+                    .iter()
+                    .position(|c| c.name == self.sess.context.name)
+                    .unwrap_or(0);
+                list.select(Some(here));
+                self.mode = Mode::Contexts(Picker {
+                    contexts,
+                    list,
+                    adding: None,
+                    error: None,
+                });
+            }
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    /// Keys for the context picker: move, ⏎ switch, `n` add a context,
+    /// esc close. While adding: type `name` (or `name path`), ⏎ adds it.
+    fn contexts_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Contexts(picker) = &mut self.mode else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(input) = &mut picker.adding {
+            match key.code {
+                KeyCode::Esc => picker.adding = None,
+                KeyCode::Char('c') if ctrl => picker.adding = None,
+                KeyCode::Enter => self.add_context(),
+                _ => {
+                    if input.handle(key) {
+                        picker.error = None;
+                    }
+                }
+            }
+            return Effect::None;
+        }
+        let count = picker.contexts.len();
+        let at = picker.list.selected().unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => picker.list.select(Some((at + 1).min(count - 1))),
+            KeyCode::Char('k') | KeyCode::Up => picker.list.select(Some(at.saturating_sub(1))),
+            KeyCode::Home | KeyCode::Char('g') => picker.list.select(Some(0)),
+            KeyCode::End | KeyCode::Char('G') => picker.list.select(Some(count - 1)),
+            KeyCode::Char('n') => {
+                picker.adding = Some(Input::default());
+                picker.error = None;
+            }
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                let target = picker.contexts[at].clone();
+                self.request_switch(target);
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'C') => self.mode = Mode::Browse,
+            KeyCode::Char('c') if ctrl => self.mode = Mode::Browse,
+            _ => {}
+        }
+        Effect::None
+    }
+
+    /// Add the context typed into the picker and switch to it: `name` makes
+    /// a new store in `$XDG_DATA_HOME/ezer-pass/<name>`; `name path` uses
+    /// the store at `path`, making it if it isn't there.
+    fn add_context(&mut self) {
+        let Mode::Contexts(picker) = &mut self.mode else {
+            return;
+        };
+        let text = picker.adding.as_ref().map_or("", |i| i.text.trim());
+        if text.is_empty() {
+            picker.adding = None;
+            return;
+        }
+        let (name, path) = match text.split_once(char::is_whitespace) {
+            Some((name, path)) => (name, Some(path.trim())),
+            None => (text, None),
+        };
+        let result = path
+            .map(context::expand)
+            .transpose()
+            .and_then(|path| context::add(name, path))
+            .and_then(|ctx| {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&ctx.path)
+                    .map_err(|e| {
+                        anyhow::anyhow!("cannot create {}: {e}", context::tilde(&ctx.path))
+                    })?;
+                Ok(ctx)
+            });
+        match result {
+            Ok(ctx) => self.request_switch(ctx),
+            Err(e) => picker.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Switch to `target`, first offering to push what this store hasn't.
+    fn request_switch(&mut self, target: Context) {
+        if target.name == self.sess.context.name {
+            self.mode = Mode::Browse;
+            return;
+        }
+        if self.upstream.is_some() {
+            self.refresh_git();
+        }
+        if self.upstream.is_some() && self.ahead > 0 {
+            self.switch_to = Some(target);
+            self.mode = Mode::Confirm(Confirm::Push { ahead: self.ahead });
+        } else {
+            self.switch(target);
+        }
+    }
+
+    /// Open `target`'s store in place of this one. The identity stays
+    /// unlocked if the two share it; marks, the buffer and the filter are
+    /// dropped, since their paths belong to the old store.
+    fn switch(&mut self, target: Context) {
+        self.mode = Mode::Browse;
+        let store = match store::Store::open(target.path.clone()) {
+            Ok(store) => store,
+            Err(e) => return self.error(format!("{e:#}")),
+        };
+        let mut sess = Session::new(target, store, true);
+        if sess.context.identity().ok() == self.sess.context.identity().ok() {
+            sess.keys = self.sess.keys.take();
+        }
+        let name = sess.context.name.clone();
+        context::remember(&name);
+        self.sess = sess;
+        self.recent = load_recent(&self.sess);
+        self.last_copy = None;
+        self.expanded.clear();
+        self.marks.clear();
+        self.buffer = None;
+        self.filter = None;
+        self.count_contexts();
+        self.refresh_git();
+        self.rebuild(None);
+        self.select(0);
+        if self.sess.store.uses_gpg() {
+            return self.error(format!(
+                "{name} is still encrypted with gpg — run `ezer-pass -C {name} migrate`"
+            ));
+        }
+        if !self.sess.store.root().join(store::RECIPIENTS).exists() {
+            // A new store: set who it is encrypted to (your own key).
+            self.next = Some(Effect::Run(Batch::new(
+                vec![Job::new(vec!["init".into()])],
+                Pause::OnError,
+            )));
+            return self.info(format!(
+                "switched to {name}, a new store encrypted to your key"
+            ));
+        }
+        if self.upstream.is_some() {
+            self.mode = Mode::Confirm(Confirm::Pull);
+        }
+        self.info(format!("switched to {name}"));
     }
 
     fn browse_key(&mut self, key: KeyEvent) -> Effect {
@@ -1112,7 +1330,7 @@ impl App {
                 self.mode = Mode::Generate(Box::new(Form::new(self.context_dir())));
             }
             KeyCode::Char('i') => self.prefill("insert ".into()),
-            KeyCode::Char('m') => self.prefill("mkdir ".into()),
+            KeyCode::Char('n') => self.prefill("mkdir ".into()),
             KeyCode::Char('I') => self.prefill("import ".into()),
             KeyCode::Char(':') => self.prefill(String::new()),
             KeyCode::Char('-') => {
@@ -1155,6 +1373,7 @@ impl App {
                 self.info("refreshed");
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('C') => self.open_contexts(),
             KeyCode::Char('u') => self.open_history(),
             _ => {}
         }
@@ -1495,6 +1714,17 @@ impl App {
             return Effect::None;
         };
         let default_yes = matches!(confirm, Confirm::Pull | Confirm::Push { .. });
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        // Backing out of a switch stays here, where `n` switches unpushed.
+        if matches!(confirm, Confirm::Push { .. })
+            && self.switch_to.is_some()
+            && (key.code == KeyCode::Esc || ctrl_c)
+        {
+            self.switch_to = None;
+            self.mode = Mode::Browse;
+            return Effect::None;
+        }
         let yes = match key.code {
             KeyCode::Char('y' | 'Y') => true,
             KeyCode::Enter => default_yes,
@@ -1535,7 +1765,7 @@ impl App {
                 Effect::None
             }
             (Confirm::Push { .. }, false) => {
-                self.quit = true;
+                self.after_push(None);
                 Effect::None
             }
             (Confirm::Delete(_) | Confirm::Overwrite { .. }, false) => Effect::None,
@@ -1630,6 +1860,20 @@ impl App {
         }
         Effect::None
     }
+}
+
+/// The context's recent entries that still exist.
+fn load_recent(sess: &Session) -> Vec<String> {
+    context::state_file(&sess.context.name, "recent")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| {
+            s.lines()
+                .filter(|p| sess.store.is_entry(p))
+                .take(RECENT_MAX)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Append the rows for `dir`'s contents, recursing into expanded folders.

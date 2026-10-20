@@ -37,6 +37,9 @@ pub fn run(sess: Session) -> Result<()> {
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     while !app.quit {
         app.tick();
+        if let Some(effect) = app.next.take() {
+            perform(terminal, app, effect)?;
+        }
         terminal.draw(|f| ui::draw(f, app))?;
         // Wake periodically so a revealed password re-masks on time, and
         // often while a spinner is turning.
@@ -131,10 +134,7 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
                     sync::Op::Push.args(),
                 ))
             })?;
-            if let Err(e) = result {
-                app.exit_warning = Some(format!("warning: {e:#} — your commits are still local"));
-            }
-            app.quit = true;
+            app.after_push(result.err());
         }
     }
     Ok(())

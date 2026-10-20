@@ -15,6 +15,8 @@ paths, and storing anything that isn't text.
   your store: `cd servers`, `ls`, `show web1`, with tab completion and history.
 - **File entries** — import any file as a base64-encoded entry and export it
   back out, with automatic detection on read.
+- **Contexts** — keep separate vaults (work, personal, a client's) side by
+  side, each its own store and git repo, and switch between them with `C`.
 
 Entry *contents* are encrypted; folder and entry *names* are not, just as with
 `pass`.
@@ -76,8 +78,9 @@ highlighted row (password, file, folder), and while items are marked or cut.
 | `u` | history: undo any past change, or roll the store back to a point |
 | `e` | edit in `$VISUAL` / `$EDITOR` |
 | `g` | generate a password in the highlighted folder: pick name, type (symbols, letters & digits, url-safe, digits, hex), length (its strength in bits is shown) and whether to avoid look-alikes like `0O1lI`; it goes straight to the clipboard and opens masked, never printed. These settings are remembered; on an existing entry it replaces only the password line |
-| `i` `m` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
+| `i` `n` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
+| `C` | switch context: pick another vault, or `n` to add one (see [Contexts](#contexts)) |
 | `Esc` | clear the filter, then marks, then the buffer |
 | `R` / `?` / `q` | refresh / help / quit |
 
@@ -149,6 +152,54 @@ hunter2
 
 Every command also works one-shot from your shell with the same syntax:
 `ezer-pass show servers/web1`, `ezer-pass import cert.pem servers/cert`.
+
+## Contexts
+
+A context is a named store: its own folder, its own git repo and remote, its
+own recipients. Keep work and personal passwords apart, sync each to a
+different place, and switch between them without leaving the TUI.
+
+```
+╭ contexts ──────────────────────────────────────────────╮
+│                                                        │
+│    default   ~/.password-store                         │
+│  ▌● work     ~/.local/share/ezer-pass/work             │
+│    client    ~/clients/acme-store  own key             │
+│                                                        │
+│  each context is its own store, synced on its own      │
+╰──────────────────────── [⏎] switch  [n] new  [esc] close ╯
+```
+
+- `C` in the TUI opens the picker. `⏎` switches; the header names the context
+  you are in. If the store you're leaving has unpushed commits, it offers to
+  push them first (`esc` stays put). Switching drops marks, the cut/copy buffer
+  and the filter; recent entries are kept per context.
+- `n` in the picker adds one: `personal` makes an empty store in
+  `~/.local/share/ezer-pass/personal` and encrypts it to your key;
+  `acme ~/clients/acme-store` uses (or makes) the store at that path.
+- From the shell, `-C <name>` (or `--context <name>`, or
+  `EZER_PASS_CONTEXT=<name>`) picks the context for one command:
+  `ezer-pass -C work show vpn`. `ezer-pass -C <new name> init` adds a context
+  the same way `n` does.
+- Without either, ezer-pass opens the context you last picked in the TUI.
+  `default` is `~/.password-store` (or `$PASSWORD_STORE_DIR`, which always
+  opens `default` unless a context is named).
+
+Contexts are listed in `~/.config/ezer-pass/contexts`, which you can edit:
+
+```ini
+[work]
+path = ~/.local/share/ezer-pass/work
+
+[client]
+path = ~/clients/acme-store
+# optional: a separate identity instead of the shared one
+identity = ~/.config/ezer-pass/acme.age
+```
+
+Every context shares your one identity (and passphrase) unless it names its
+own, so switching between them never asks again. A context with its own
+identity asks for that one's passphrase the first time it decrypts.
 
 ## Keys and encryption
 
@@ -295,12 +346,14 @@ refused without `--force` — a password store is a poor home for large blobs.
 
 | Variable | Effect |
 |---|---|
-| `PASSWORD_STORE_DIR` | store location (default `~/.password-store`), same as pass |
-| `EZER_PASS_IDENTITY` | identity file (default `$XDG_CONFIG_HOME/ezer-pass/identity.age`) |
+| `PASSWORD_STORE_DIR` | the `default` context's store (default `~/.password-store`), same as pass |
+| `EZER_PASS_CONTEXT` | context to open, like `-C` (default: the one last picked in the TUI) |
+| `EZER_PASS_IDENTITY` | identity file for every context (default `$XDG_CONFIG_HOME/ezer-pass/identity.age`, or a context's own) |
 | `PASSWORD_STORE_CLIP_TIME` | seconds a copied password stays on the clipboard, and before a revealed one re-masks in the TUI (default 45) |
 | `PASSWORD_STORE_GENERATED_LENGTH` | default length for `generate` (default 25) |
 | `VISUAL` / `EDITOR` | editor for `edit` (default `vi`) |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |
+| `XDG_DATA_HOME` | where new contexts' stores go (default `~/.local/share`) |
 | `EZER_PASS_ICONS` | `plain` draws folders as `▶`/`▼` instead of Nerd Font folder icons, for fonts without them |
 
 ## Development

@@ -150,7 +150,7 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         .build();
     let mut rl: Editor<EzerHelper, FileHistory> = Editor::with_config(config)?;
     rl.set_helper(Some(EzerHelper {
-        store: store::Store::open()?,
+        store: store::Store::open(sess.store.root().to_path_buf())?,
         cwd: String::new(),
         filename: FilenameCompleter::new(),
     }));
@@ -163,8 +163,13 @@ pub fn run(sess: &mut Session) -> anyhow::Result<()> {
         let _ = rl.load_history(path);
     }
 
+    let context = if sess.context.name == crate::context::DEFAULT {
+        String::new()
+    } else {
+        format!(" [{}]", sess.context.name.cyan())
+    };
     println!(
-        "{} — exploring {} (`help` for commands)",
+        "{}{context} — exploring {} (`help` for commands)",
         "ezer-pass".green().bold(),
         sess.store.root().display()
     );

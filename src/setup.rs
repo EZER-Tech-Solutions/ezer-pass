@@ -3,6 +3,7 @@
 //! by `pass`, moved from gpg to age once).
 
 use crate::commands::Session;
+use crate::context::tilde;
 use crate::crypto::{self, Keys, WrongPassphrase};
 use crate::git;
 use crate::store::{self, RECIPIENTS};
@@ -17,35 +18,23 @@ use zeroize::Zeroizing;
 
 /// Read the identity, asking for its passphrase on the terminal (three
 /// tries) when it has one.
-pub fn unlock_on_terminal() -> Result<Keys> {
-    if !crypto::needs_passphrase()? {
-        return crypto::unlock(None);
+pub fn unlock_on_terminal(path: &Path) -> Result<Keys> {
+    if !crypto::needs_passphrase(path)? {
+        return crypto::unlock(path, None);
     }
-    let path = crypto::identity_path()?;
     let mut tries = 0;
     loop {
         let passphrase = SecretString::from(rpassword::prompt_password(format!(
             "passphrase for {}: ",
-            tilde(&path)
+            tilde(path)
         ))?);
-        match crypto::unlock(Some(&passphrase)) {
+        match crypto::unlock(path, Some(&passphrase)) {
             Err(e) if e.is::<WrongPassphrase>() && tries < 2 => {
                 eprintln!("{}", "wrong passphrase, try again".red());
                 tries += 1;
             }
             result => return result,
         }
-    }
-}
-
-/// A path with `$HOME` shown as `~`.
-fn tilde(path: &Path) -> String {
-    let shown = path.display().to_string();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && shown.starts_with(&home) => {
-            format!("~{}", &shown[home.len()..])
-        }
-        _ => shown,
     }
 }
 
@@ -67,14 +56,14 @@ fn new_passphrase() -> Result<SecretString> {
 /// Make an identity if there isn't one yet, leaving the session unlocked
 /// with it.
 fn ensure_identity(sess: &mut Session) -> Result<()> {
-    let path = crypto::identity_path()?;
+    let path = sess.context.identity()?;
     if path.exists() {
         return Ok(());
     }
     println!("no identity yet; making one at {}", tilde(&path).cyan());
     let passphrase = new_passphrase()?;
-    let public = crypto::create_identity(&passphrase)?;
-    sess.keys = Some(crypto::unlock(Some(&passphrase))?);
+    let public = crypto::create_identity(&path, &passphrase)?;
+    sess.keys = Some(crypto::unlock(&path, Some(&passphrase))?);
     println!("your public key is {}", public.to_string().green());
     println!(
         "{} back up {} — without it and its passphrase nothing in the store can be read",
@@ -326,7 +315,7 @@ pub fn migrate(sess: &mut Session) -> Result<()> {
     println!(
         "{} your identity is {} — back it up, and copy it to any other machine that uses this store",
         "important:".yellow().bold(),
-        tilde(&crypto::identity_path()?)
+        tilde(&sess.context.identity()?)
     );
     Ok(())
 }

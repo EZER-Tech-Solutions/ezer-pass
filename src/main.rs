@@ -1,10 +1,11 @@
 //! @file main.rs
 //! @author andrewb242
 //!
-//! This is the main entry point of the ezer-pass program, a password manager written in Rust. It initializes the password store, processes command-line arguments, and either runs a REPL (Read-Eval-Print Loop) for interactive use or executes commands based on the provided arguments. The program handles errors gracefully and returns appropriate exit codes.
+//! This is the main entry point of the ezer-pass program, a password manager written in Rust. It picks the context (named store) to work in, opens its password store, processes command-line arguments, and either runs a REPL (Read-Eval-Print Loop) for interactive use or executes commands based on the provided arguments. The program handles errors gracefully and returns appropriate exit codes.
 
 mod clipboard;
 mod commands;
+mod context;
 mod crypto;
 mod fileio;
 mod git;
@@ -22,7 +23,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     // Read the command-line arguments:
     // - Skips the first arg (the program name)
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     // A detached copy of ezer-pass that clears the clipboard later.
     if args.first().map(String::as_str) == Some(clipboard::CLEAR_ARG) {
@@ -30,18 +31,23 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Initialize the password store:
-    // - Searches initializes the store from the `PASSWORD_STORE_DIR` environment variable.
-    // - or defaults to `$HOME/.password-store`.
-    // `init` makes one if there is none.
-    let command = args.first().map(String::as_str);
-    let opened = if command == Some("init") {
-        store::Store::create()
-    } else {
-        store::Store::open()
+    // `-C <name>` / `--context <name>` picks the context (named store) for
+    // this run, ahead of `$EZER_PASS_CONTEXT` and the one last used.
+    let named = match take_context_flag(&mut args) {
+        Ok(named) => named,
+        Err(e) => {
+            eprintln!("ezer-pass: {e:#}");
+            return ExitCode::FAILURE;
+        }
     };
-    let store = match opened {
-        Ok(store) => store,
+
+    // Open the context's store. `init` makes one if there is none, and
+    // `init` on a context that doesn't exist yet adds it, with its store in
+    // `$XDG_DATA_HOME/ezer-pass/<name>`.
+    let command = args.first().map(String::as_str);
+    let opened = open(named.as_deref(), command == Some("init"));
+    let (context, store) = match opened {
+        Ok(opened) => opened,
         Err(e) => {
             eprintln!("ezer-pass: {e:#}");
             return ExitCode::FAILURE;
@@ -63,7 +69,7 @@ fn main() -> ExitCode {
     // - The store
     // - The interactive flag
     // - The current working directory within the store, which is used for relative paths.
-    let mut session = commands::Session::new(store, interactive);
+    let mut session = commands::Session::new(context, store, interactive);
     let result = if args.is_empty() {
         if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
             tui::run(session)
@@ -87,4 +93,49 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Take a leading `-C <name>`, `-C<name>`, `--context <name>` or
+/// `--context=<name>` out of `args`.
+fn take_context_flag(args: &mut Vec<String>) -> anyhow::Result<Option<String>> {
+    let Some(first) = args.first() else {
+        return Ok(None);
+    };
+    let (name, used) = if first == "-C" || first == "--context" {
+        let name = args
+            .get(1)
+            .ok_or_else(|| anyhow::anyhow!("{first} needs a context name"))?;
+        (name.clone(), 2)
+    } else if let Some(name) = first.strip_prefix("--context=") {
+        (name.to_string(), 1)
+    } else if let Some(name) = first.strip_prefix("-C") {
+        (name.to_string(), 1)
+    } else {
+        return Ok(None);
+    };
+    if name.is_empty() {
+        anyhow::bail!("{first} needs a context name");
+    }
+    args.drain(..used);
+    Ok(Some(name))
+}
+
+/// The context to work in and its store.
+fn open(named: Option<&str>, init: bool) -> anyhow::Result<(context::Context, store::Store)> {
+    let context = match context::current(named) {
+        Ok(context) => context,
+        Err(_) if init && named.is_some() => {
+            let name = named.expect("checked");
+            let context = context::add(name, None)?;
+            println!("added context {name} at {}", context::tilde(&context.path));
+            context
+        }
+        Err(e) => return Err(e),
+    };
+    let store = if init {
+        store::Store::create(context.path.clone())?
+    } else {
+        store::Store::open(context.path.clone())?
+    };
+    Ok((context, store))
 }

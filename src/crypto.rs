@@ -9,22 +9,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 use zeroize::Zeroizing;
-
-/// Where the identity lives: `$EZER_PASS_IDENTITY`, else
-/// `$XDG_CONFIG_HOME/ezer-pass/identity.age`.
-pub fn identity_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("EZER_PASS_IDENTITY") {
-        return Ok(PathBuf::from(path));
-    }
-    let config = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".config"),
-    };
-    Ok(config.join("ezer-pass").join("identity.age"))
-}
 
 /// The passphrase didn't open the identity.
 #[derive(Debug)]
@@ -64,10 +51,9 @@ fn is_age_file(data: &[u8]) -> bool {
         || data.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
 }
 
-fn read_identity_file() -> Result<(PathBuf, Zeroizing<Vec<u8>>)> {
-    let path = identity_path()?;
-    match fs::read(&path) {
-        Ok(data) => Ok((path, Zeroizing::new(data))),
+fn read_identity_file(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(data) => Ok(Zeroizing::new(data)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
             "no identity at {} (run `ezer-pass init` to make one, or set EZER_PASS_IDENTITY)",
             path.display()
@@ -76,14 +62,15 @@ fn read_identity_file() -> Result<(PathBuf, Zeroizing<Vec<u8>>)> {
     }
 }
 
-/// Whether unlocking takes a passphrase: false for a plain key file.
-pub fn needs_passphrase() -> Result<bool> {
-    Ok(is_age_file(&read_identity_file()?.1))
+/// Whether unlocking the identity at `path` takes a passphrase: false for
+/// a plain key file.
+pub fn needs_passphrase(path: &Path) -> Result<bool> {
+    Ok(is_age_file(&read_identity_file(path)?))
 }
 
-/// Read the identity, decrypting it with `passphrase` if it has one.
-pub fn unlock(passphrase: Option<&SecretString>) -> Result<Keys> {
-    let (path, data) = read_identity_file()?;
+/// Read the identity at `path`, decrypting it with `passphrase` if it has one.
+pub fn unlock(path: &Path, passphrase: Option<&SecretString>) -> Result<Keys> {
+    let data = read_identity_file(path)?;
     let text = if is_age_file(&data) {
         let passphrase = passphrase.context("the identity needs its passphrase")?;
         let identity = age::scrypt::Identity::new(passphrase.clone());
@@ -116,10 +103,9 @@ pub fn unlock(passphrase: Option<&SecretString>) -> Result<Keys> {
     Ok(Keys { identities })
 }
 
-/// Make a new identity under `passphrase`, returning its public key.
-/// Refuses to replace one that exists.
-pub fn create_identity(passphrase: &SecretString) -> Result<x25519::Recipient> {
-    let path = identity_path()?;
+/// Make a new identity at `path` under `passphrase`, returning its public
+/// key. Refuses to replace one that exists.
+pub fn create_identity(path: &Path, passphrase: &SecretString) -> Result<x25519::Recipient> {
     if path.exists() {
         bail!("{} already exists", path.display());
     }
@@ -146,7 +132,7 @@ pub fn create_identity(passphrase: &SecretString) -> Result<x25519::Recipient> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&path)
+        .open(path)
         .and_then(|mut f| f.write_all(&out))
         .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(public)

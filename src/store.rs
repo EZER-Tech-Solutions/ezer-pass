@@ -27,21 +27,8 @@ pub struct Node {
 }
 
 impl Store {
-    /// Where the store lives: `$PASSWORD_STORE_DIR` if set, otherwise
-    /// `$HOME/.password-store`.
-    pub fn location() -> Result<PathBuf> {
-        match std::env::var_os("PASSWORD_STORE_DIR") {
-            Some(dir) => Ok(PathBuf::from(dir)),
-            None => {
-                let home = std::env::var_os("HOME").context("HOME is not set")?;
-                Ok(Path::new(&home).join(".password-store"))
-            }
-        }
-    }
-
-    /// Opens the user password store, returning an error if it does not exist.
-    pub fn open() -> Result<Self> {
-        let root = Self::location()?;
+    /// Opens the store at `root`, returning an error if it does not exist.
+    pub fn open(root: PathBuf) -> Result<Self> {
         if !root.is_dir() {
             bail!(
                 "password store not found at {} (run `ezer-pass init` to make one)",
@@ -51,9 +38,8 @@ impl Store {
         Ok(Store { root })
     }
 
-    /// Opens the store, making an empty one first if there is none.
-    pub fn create() -> Result<Self> {
-        let root = Self::location()?;
+    /// Opens the store at `root`, making an empty one first if there is none.
+    pub fn create(root: PathBuf) -> Result<Self> {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)

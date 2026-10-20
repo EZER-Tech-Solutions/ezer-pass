@@ -1,4 +1,4 @@
-use super::app::{App, Confirm, Mode, Row, Secret, Unlock, basename};
+use super::app::{App, Confirm, Mode, Picker, Row, Secret, Unlock, basename};
 use super::generate::{Field, Form};
 use super::history;
 use super::palette;
@@ -61,13 +61,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             | Mode::Sync(_)
             | Mode::Generate(_)
             | Mode::Unlock(_)
+            | Mode::Contexts(_)
     ) {
         // Push everything behind a popup into the background.
         let area = f.area();
         f.buffer_mut().set_style(area, Style::new().dim());
     }
     match &app.mode {
-        Mode::Confirm(confirm) => draw_confirm(f, confirm, app.upstream.as_deref()),
+        Mode::Confirm(confirm) => draw_confirm(f, app, confirm),
         Mode::View(_) => draw_view(f, app),
         Mode::Help => draw_help(f),
         Mode::Generate(form) => draw_generate(f, form),
@@ -75,8 +76,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let palette = palette::suggest(&input.text, &app.sess.store, &app.sess.cwd);
             draw_palette(f, footer, &palette, app.palette_sel);
         }
-        Mode::Sync(sync) => draw_sync(f, sync, app.upstream.as_deref()),
+        Mode::Sync(sync) => draw_sync(f, app, sync),
         Mode::Unlock(u) => draw_unlock(f, u),
+        Mode::Contexts(picker) => draw_contexts(f, app, picker),
         _ => {}
     }
 }
@@ -182,13 +184,22 @@ fn guides(rows: &[Row]) -> Vec<String> {
 }
 
 fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
-    let root = short_root(app, area.width.saturating_sub(16) as usize);
+    let mut title = vec![" ezer-pass ".fg(Color::LightMagenta).bg(SHADE).bold()];
+    if app.show_context {
+        title.push(" ".into());
+        title.push(
+            format!(" {} ", app.sess.context.name)
+                .fg(ACCENT)
+                .bg(SHADE)
+                .bold(),
+        );
+    }
+    title.push(" ".into());
+    let title = Line::from(title);
+    let root = short_root(app, (area.width as usize).saturating_sub(title.width() + 5));
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            " ezer-pass ".fg(Color::LightMagenta).bg(SHADE).bold(),
-            " ".into(),
-        ]))
+        .title(title)
         .title_top(Line::from(format!(" {root} ").dim()).right_aligned())
         .border_style(Style::new().fg(BORDER));
     if app.filtering() {
@@ -672,7 +683,7 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
                 ),
                 ("g", "generate"),
                 ("i", "insert"),
-                ("m", "new folder"),
+                ("n", "new folder"),
                 ("I", "import file"),
                 ("␣", "mark"),
                 ("r", "rename"),
@@ -747,8 +758,8 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 /// A background pull/push: a spinner and git's latest output while it
 /// runs; on failure, git's output and the ways out.
-fn draw_sync(f: &mut Frame, sync: &Sync, upstream: Option<&str>) {
-    let upstream = upstream.unwrap_or("upstream").to_string();
+fn draw_sync(f: &mut Frame, app: &App, sync: &Sync) {
+    let upstream = app.upstream.as_deref().unwrap_or("upstream").to_string();
     let verb = sync.op.verb();
     let shown = if sync.failed { 8 } else { 3 };
     let tail = &sync.output[sync.output.len().saturating_sub(shown)..];
@@ -771,7 +782,14 @@ fn draw_sync(f: &mut Frame, sync: &Sync, upstream: Option<&str>) {
             Op::Pull => hint(&[("r", "retry in terminal"), ("esc", "close")]),
             Op::Push => hint(&[
                 ("r", "retry in terminal"),
-                ("q", "quit anyway"),
+                (
+                    "q",
+                    if app.switch_to.is_some() {
+                        "switch anyway"
+                    } else {
+                        "quit anyway"
+                    },
+                ),
                 ("esc", "back"),
             ]),
         };
@@ -818,7 +836,8 @@ fn draw_sync(f: &mut Frame, sync: &Sync, upstream: Option<&str>) {
     );
 }
 
-fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
+fn draw_confirm(f: &mut Frame, app: &App, confirm: &Confirm) {
+    let upstream = app.upstream.as_deref();
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     let (title, question, default_yes) = match confirm {
         Confirm::Delete(targets) => (
@@ -858,9 +877,13 @@ fn draw_confirm(f: &mut Frame, confirm: &Confirm, upstream: Option<&str>) {
         Confirm::Push { ahead } => (
             "git push",
             format!(
-                "push {ahead} commit{} to {}?",
+                "push {ahead} commit{} to {}{}?",
                 plural(*ahead as usize),
-                upstream.unwrap_or("upstream")
+                upstream.unwrap_or("upstream"),
+                match &app.switch_to {
+                    Some(target) => format!(" before switching to {}", target.name),
+                    None => String::new(),
+                }
             ),
             true,
         ),
@@ -1220,7 +1243,7 @@ fn draw_help(f: &mut Frame) {
             &[
                 ("g", "generate a password here"),
                 ("i", "insert a password here"),
-                ("m", "make a folder here"),
+                ("n", "make a folder here"),
                 ("I", "import a file here"),
             ],
         ),
@@ -1228,6 +1251,7 @@ fn draw_help(f: &mut Frame) {
             "more",
             &[
                 (":", "commands (type to narrow them)"),
+                ("C", "switch context (work, personal…)"),
                 ("R", "refresh"),
                 ("q", "quit (offers to push)"),
             ],
@@ -1451,23 +1475,119 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y + row));
 }
 
+/// The `C` popup: every context with its store, the current one marked;
+/// below, the line for adding one while it is being typed.
+fn draw_contexts(f: &mut Frame, app: &App, picker: &Picker) {
+    let selected = picker.list.selected();
+    let name_width = picker
+        .contexts
+        .iter()
+        .map(|c| c.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let width = 90.min(f.area().width);
+    // Bar, mark, name, gaps, "own key", borders and padding.
+    let path_width = (width as usize).saturating_sub(name_width + 21);
+    let mut lines: Vec<Line> = picker
+        .contexts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let here = c.name == app.sess.context.name;
+            let highlighted = picker.adding.is_none() && selected == Some(i);
+            let mut spans = vec![
+                if highlighted {
+                    BAR.fg(ACCENT)
+                } else {
+                    " ".into()
+                },
+                if here { "● ".fg(ACCENT) } else { "  ".into() },
+                {
+                    let name = format!("{:<name_width$}", c.name);
+                    if highlighted {
+                        name.fg(ACCENT).bold()
+                    } else {
+                        name.bold()
+                    }
+                },
+                format!("  {}", cut_left(crate::context::tilde(&c.path), path_width)).dim(),
+            ];
+            if c.identity.is_some() {
+                spans.push("  own key".fg(DIR));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    lines.push("".into());
+    let mut cursor = None;
+    match &picker.adding {
+        Some(input) => {
+            lines.push(Line::from(vec![
+                BAR.fg(ACCENT),
+                "new ".fg(ACCENT).bold(),
+                input.text.clone().bold(),
+            ]));
+            cursor = Some((lines.len() - 1, 5 + input.cursor_col()));
+            lines.push(
+                "a name makes an empty store; name and a path use the store there"
+                    .dim()
+                    .into(),
+            );
+        }
+        None => lines.push(
+            "each context is its own store, synced on its own"
+                .dim()
+                .into(),
+        ),
+    }
+    if let Some(e) = &picker.error {
+        lines.push(Line::from(vec![
+            "✗ ".fg(DANGER).bold(),
+            e.clone().fg(DANGER),
+        ]));
+    }
+    let mut keys = if picker.adding.is_some() {
+        hint(&[("⏎", "add & switch"), ("esc", "cancel")])
+    } else {
+        hint(&[("⏎", "switch"), ("n", "new"), ("esc", "close")])
+    };
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let block = popup(Line::from(" contexts ").bold(), ACCENT)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(1, 2, 1, 1));
+    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    let inner = block.inner(area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
+    if let Some((row, col)) = cursor {
+        let x = inner.x + col as u16;
+        f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y + row as u16));
+    }
+}
+
 /// The store root for the tree's title: `~` for $HOME, and cut from the
 /// left to fit `max` columns.
 fn short_root(app: &App, max: usize) -> String {
-    let mut root = app.sess.store.root().display().to_string();
-    if let Some(home) = std::env::var_os("HOME")
-        && let Some(rest) = root.strip_prefix(&*home.to_string_lossy())
-    {
-        root = format!("~{rest}");
-    }
-    let len = root.chars().count();
+    cut_left(crate::context::tilde(app.sess.store.root()), max)
+}
+
+/// `text` cut from the left, behind a `…`, to fit `max` columns.
+fn cut_left(text: String, max: usize) -> String {
+    let len = text.chars().count();
     if len > max {
-        root = format!(
+        format!(
             "…{}",
-            root.chars().skip(len + 1 - max.max(1)).collect::<String>()
-        );
+            text.chars().skip(len + 1 - max.max(1)).collect::<String>()
+        )
+    } else {
+        text
     }
-    root
 }
 
 /// A centered rect of fixed size, clamped to `area`.

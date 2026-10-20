@@ -1,3 +1,4 @@
+use crate::context;
 use crate::crypto::{self, Keys};
 use crate::password::{Kind, Spec};
 use crate::store::{self, EXT};
@@ -15,6 +16,8 @@ pub const COMMANDS: &[&str] = &[
 ];
 
 pub struct Session {
+    /// Which named store this is (work, personal, ...).
+    pub context: context::Context,
     pub store: store::Store,
     /// Current store directory ("" = root).
     pub cwd: String,
@@ -31,10 +34,11 @@ pub enum Outcome {
 }
 
 impl Session {
-    pub fn new(store: store::Store, interactive: bool) -> Self {
+    pub fn new(context: context::Context, store: store::Store, interactive: bool) -> Self {
         // initialize the session with the store and set the current working directory to root
         let files = index::FileIndex::load(store.root());
         Session {
+            context,
             store,
             cwd: String::new(),
             interactive,
@@ -47,7 +51,7 @@ impl Session {
     /// the terminal.
     pub fn unlock(&mut self) -> Result<&Keys> {
         if self.keys.is_none() {
-            self.keys = Some(setup::unlock_on_terminal()?);
+            self.keys = Some(setup::unlock_on_terminal(&self.context.identity()?)?);
         }
         Ok(self.keys.as_ref().expect("just unlocked"))
     }
@@ -1143,6 +1147,10 @@ fn print_help() {
     entry(
         "migrate",
         "move a store made by `pass` from gpg to age, once",
+    );
+    entry(
+        "-C <context> <command>",
+        "work in another context (named store); `-C <new> init` adds one",
     );
     println!();
     section("version control");

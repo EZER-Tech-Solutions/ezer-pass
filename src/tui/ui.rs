@@ -676,7 +676,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, preview: &Preview) {
                 None => lines.push(Line::from(vec![
                     MASK.dim(),
                     "   ".into(),
-                    "[v]".fg(ACCENT).bold(),
+                    "[⏎]".fg(ACCENT).bold(),
                     " unlock".dim(),
                 ])),
             }
@@ -889,7 +889,6 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
             ],
             Some(row) if app.sess.files.is_file(&row.path) => vec![
                 ("⏎", "export"),
-                ("v", "view"),
                 ("r", "rename"),
                 ("d", "delete"),
                 ("␣", "mark"),
@@ -898,8 +897,8 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
                 (":", "command"),
             ],
             Some(_) => vec![
-                ("⏎", "copy"),
-                ("v", "view"),
+                ("⏎", "view"),
+                ("c", "copy"),
                 ("e", "edit"),
                 ("r", "rename"),
                 ("d", "delete"),
@@ -1415,9 +1414,8 @@ fn draw_help(f: &mut Frame) {
         (
             "use",
             &[
-                ("⏎", "copy password · export file"),
+                ("⏎", "view entry (space reveals) · export file"),
                 ("c", "copy password"),
-                ("v", "view entry (space reveals)"),
                 ("1-5", "use a recent entry again"),
                 ("e", "edit in $EDITOR"),
                 ("E", "export an entry to a file"),

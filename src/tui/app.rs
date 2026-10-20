@@ -147,7 +147,7 @@ pub enum Secret {
     File { filename: String, size: usize },
 }
 
-/// The decrypted entry in the `v` popup. Dropped when the popup closes, so
+/// The decrypted entry in the view popup (⏎ on a password). Dropped when the popup closes, so
 /// plaintext is held only while it is on screen.
 pub struct View {
     pub path: String,
@@ -1288,7 +1288,10 @@ impl App {
                     }
                     self.rebuild(None);
                 }
-                Some((path, false, _)) => return self.use_entry(path),
+                Some((path, false, _)) if self.sess.files.is_file(&path) => {
+                    return self.use_entry(path);
+                }
+                Some((path, false, _)) => return Effect::Decrypt(path),
                 None => {}
             },
             KeyCode::Char('c') => {
@@ -1301,11 +1304,6 @@ impl App {
                     } else {
                         return Effect::Copy(path);
                     }
-                }
-            }
-            KeyCode::Char('v') => {
-                if let Some(path) = self.selected_entry() {
-                    return Effect::Decrypt(path);
                 }
             }
             KeyCode::Char(c @ '1'..='9') => {

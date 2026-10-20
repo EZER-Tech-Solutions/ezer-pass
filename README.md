@@ -57,7 +57,7 @@ Run `ezer-pass` with no arguments:
 │                                 ││ marks   ▌1 marked   x cut y copy d …   │
 │                                 ││ git     origin/master  ↑2 to push      │
 ╰─────────────────────────────────╯╰────────────────────────────────────────╯
-[⏎] copy  [v] view  [e] edit  [r] rename  [d] delete  [␣] mark  [/] filter  [?] help
+[⏎] view  [c] copy  [e] edit  [r] rename  [d] delete  [␣] mark  [/] filter  [?] help
 ```
 
 The top pane is a collapsible tree of the store, headed by the store itself:
@@ -76,10 +76,9 @@ marked or cut.
 |---|---|
 | `j` `k` / arrows | move (`PgUp` `PgDn` `Home` `End`) |
 | `l` / `→`, `h` / `←` | expand / collapse a folder, step in / jump to parent |
-| `Enter` | copy the password, export a file entry, or toggle a folder |
+| `Enter` | view the entry in a popup (`space` reveals the password), export a file entry, or toggle a folder |
 | `H` / `Backspace` | collapse the folder the cursor is in, landing on it |
 | `-` | collapse everything |
-| `v` | view the entry in a popup; `space` reveals the password |
 | `c`, `1`-`5` | copy the highlighted entry, or a recent one |
 | `/` | fuzzy-filter the tree in place; `Esc` clears |
 | `space` | mark / unmark (moves down) |
@@ -98,7 +97,7 @@ marked or cut.
 - Pasting moves or copies, re-encrypting entries that land in a folder with
   different recipients, and every change is a git commit. Overwriting an
   existing entry asks first; copying into the same folder makes `name-copy`.
-- Passwords are never on screen unless you open `v` and press `space`; a
+- Passwords are never on screen unless you open one with `Enter` and press `space`; a
   revealed password re-masks after `PASSWORD_STORE_CLIP_TIME` (45 s), and the
   plaintext is dropped when the popup closes. The rest of the entry (`user:`,
   `url:`, notes) is shown in the popup.

@@ -2,6 +2,7 @@ use super::app::{App, Confirm, Mode, Picker, Row, Secret, Unlock, basename, join
 use super::generate::{Field, Form};
 use super::history;
 use super::palette;
+use super::preview::{Body, Preview};
 use super::sync::{Op, Sync};
 use crate::password::{Kind, LOOK_ALIKES};
 use crate::{index, store};
@@ -34,6 +35,13 @@ const SHADE: Color = Color::Indexed(236);
 const BORDER: Color = Color::Indexed(242);
 /// Width of the label column in the info pane.
 const LABEL: usize = 8;
+/// The narrowest terminal that gets the preview pane beside the tree.
+const PREVIEW_MIN_WIDTH: u16 = 110;
+
+/// Whether a terminal `width` columns wide shows the preview pane.
+pub fn preview_fits(width: u16) -> bool {
+    width >= PREVIEW_MIN_WIDTH
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     if let Mode::History(_) = app.mode {
@@ -48,7 +56,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let [recent, info] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(bottom);
 
-    draw_tree(f, tree, app);
+    if let Some(preview) = &app.preview {
+        let side = (tree.width * 4 / 10).clamp(40, 60);
+        let [tree, side] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(side)]).areas(tree);
+        draw_preview(f, side, app, preview);
+        draw_tree(f, tree, app);
+    } else {
+        draw_tree(f, tree, app);
+    }
     draw_recent(f, recent, app);
     draw_info(f, info, app);
     draw_footer(f, footer, app);
@@ -414,21 +430,23 @@ fn labeled(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn draw_info(f: &mut Frame, area: Rect, app: &App) {
+/// The highlighted row's name and a line of detail: the top of the info
+/// pane, or the preview pane's title and first line.
+fn selection(app: &App) -> (Line<'static>, Line<'static>) {
     let mut lines: Vec<Line> = Vec::new();
-
+    let mut push = |line: Line<'static>| lines.push(line);
     match app.selected() {
         Some(row) if row.is_dir => {
             let root = row.path.is_empty();
             if root {
-                lines.push(Line::from(vec![
+                push(Line::from(vec![
                     row.name.clone().fg(ACCENT).bold(),
                     format!("  {}", crate::context::tilde(app.sess.store.root())).dim(),
                 ]));
             } else {
                 let mut name = path_spans(&row.path, Style::new().fg(DIR).bold());
                 name.push("/".fg(DIR).bold());
-                lines.push(Line::from(name));
+                push(Line::from(name));
             }
             let detail = match app.sess.store.list(&row.path) {
                 Ok(children) => {
@@ -454,7 +472,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
                 }
                 Err(_) => "folder".into(),
             };
-            lines.push(detail.dim().into());
+            push(detail.dim().into());
         }
         Some(row) => {
             let size = app.sess.files.size(&row.path);
@@ -463,7 +481,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::new().bold()
             };
-            lines.push(Line::from(path_spans(&row.path, style)));
+            push(Line::from(path_spans(&row.path, style)));
             let mut detail = vec![
                 match size {
                     Some(bytes) => format!("file · {}", index::human_size(bytes)),
@@ -479,12 +497,25 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
                 detail.push("[⏎]".fg(ACCENT).bold());
                 detail.push(" export".dim());
             }
-            lines.push(Line::from(detail));
+            push(Line::from(detail));
         }
         None => {
-            lines.push("nothing selected".dim().into());
-            lines.push("".into());
+            push("nothing selected".dim().into());
+            push("".into());
         }
+    }
+    let mut lines = lines.into_iter();
+    let name = lines.next().unwrap_or_default();
+    (name, lines.next().unwrap_or_default())
+}
+
+fn draw_info(f: &mut Frame, area: Rect, app: &App) {
+    let mut lines: Vec<Line> = Vec::new();
+    // Beside the preview, which shows the selection, this pane is left to
+    // the session.
+    if app.preview.is_none() {
+        let (name, detail) = selection(app);
+        lines.extend([name, detail]);
     }
 
     lines.push(labeled(
@@ -537,6 +568,24 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         },
     ));
 
+    if app.preview.is_some() {
+        lines.push(labeled(
+            "keys",
+            if app.sess.keys.is_some() {
+                vec!["unlocked".fg(ACCENT)]
+            } else {
+                vec!["locked".dim()]
+            },
+        ));
+        lines.push(labeled(
+            "store",
+            vec![
+                app.sess.context.name.clone().fg(ACCENT).bold(),
+                format!("  {}", crate::context::tilde(app.sess.store.root())).dim(),
+            ],
+        ));
+    }
+
     f.render_widget(
         Paragraph::new(lines).block(pane("info").padding(Padding::left(1))),
         area,
@@ -556,14 +605,122 @@ fn secret_lines(text: &str, revealed: bool) -> Vec<Line<'_>> {
     if text.lines().nth(1).is_some() {
         out.push("".into());
     }
-    for line in lines {
-        out.push(match line.split_once(": ") {
-            Some((k, v)) if !k.is_empty() && !k.contains(' ') => {
-                Line::from(vec![format!("{k}: ").cyan(), v.into()])
-            }
-            _ => line.into(),
-        });
+    out.extend(lines.map(field_line));
+    out
+}
+
+/// A line after an entry's password, with a `key:` prefix tinted.
+fn field_line(line: &str) -> Line<'_> {
+    match line.split_once(": ") {
+        Some((k, v)) if !k.is_empty() && !k.contains(' ') => {
+            Line::from(vec![format!("{k}: ").cyan(), v.into()])
+        }
+        _ => line.into(),
     }
+}
+
+/// The preview pane: the highlighted row's details, who a folder is
+/// encrypted to or an entry's lines after its password, and the commits
+/// that touched it.
+fn draw_preview(f: &mut Frame, area: Rect, app: &App, preview: &Preview) {
+    let (name, detail) = selection(app);
+    let width = area.width.saturating_sub(4) as usize;
+    let mut title = name;
+    title.spans.insert(0, " ".into());
+    title.push_span(" ");
+    let mut lines = vec![detail];
+    // The preview loads before each draw, so it is for this row; but say
+    // nothing rather than something wrong.
+    let current = app.selected().is_some_and(|r| r.path == preview.path());
+
+    match &preview.body {
+        _ if !current => {}
+        Body::Folder(Ok((from, recipients))) => {
+            lines.push("".into());
+            let mut label = vec!["encrypted to".dim()];
+            if from != preview.path() {
+                label.push(format!(" · set in {}", store::display_dir(from)).dim());
+            }
+            lines.push(Line::from(label));
+            for r in recipients {
+                let mut spans = vec![
+                    "  ".into(),
+                    middle_cut(&r.key, width.saturating_sub(6)).into(),
+                ];
+                if r.you {
+                    spans.push(" you".fg(ACCENT));
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+        Body::Folder(Err(e)) => {
+            lines.push("".into());
+            lines.push(Line::from(vec![
+                "✗ ".fg(DANGER).bold(),
+                e.clone().fg(DANGER),
+            ]));
+        }
+        Body::Entry(fields) => {
+            lines.push("".into());
+            match fields {
+                Some(Ok(rest)) => {
+                    lines.push(MASK.dim().into());
+                    lines.extend(rest.lines().map(field_line));
+                }
+                Some(Err(e)) => {
+                    lines.push(Line::from(vec![
+                        "✗ ".fg(DANGER).bold(),
+                        e.clone().fg(DANGER),
+                    ]));
+                }
+                None => lines.push(Line::from(vec![
+                    MASK.dim(),
+                    "   ".into(),
+                    "[v]".fg(ACCENT).bold(),
+                    " unlock".dim(),
+                ])),
+            }
+        }
+        Body::File => {}
+    }
+
+    if current && !preview.history.is_empty() {
+        lines.push("".into());
+        lines.push("history".dim().into());
+        let room = area.height.saturating_sub(2) as usize;
+        for (time, subject) in preview
+            .history
+            .iter()
+            .take(room.saturating_sub(lines.len()))
+        {
+            let when = format!("{:>3} ", short_ago(commit_time(*time)));
+            lines.push(Line::from(vec![
+                when.dim(),
+                truncate(subject, width.saturating_sub(4)).into(),
+            ]));
+        }
+    }
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(title.bold())
+        .border_style(Style::new().fg(BORDER))
+        .padding(Padding::horizontal(1));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// `s` cut to `max` characters by dropping its middle, so both ends of a
+/// key stay recognizable.
+fn middle_cut(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max || max < 3 {
+        return s.to_string();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let mut out: String = s.chars().take(head).collect();
+    out.push('…');
+    out.extend(s.chars().skip(len - tail));
     out
 }
 
@@ -1644,6 +1801,20 @@ fn popup_fixed(area: Rect, width: u16, height: u16) -> Rect {
         .flex(Flex::Center)
         .areas(area);
     area
+}
+
+/// "3d"-style age of a timestamp, for narrow columns.
+fn short_ago(t: SystemTime) -> String {
+    let secs = t.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    let (n, unit) = match secs {
+        s if s < 60 => return "now".into(),
+        s if s < 3600 => (s / 60, "m"),
+        s if s < 86400 => (s / 3600, "h"),
+        s if s < 86400 * 60 => (s / 86400, "d"),
+        s if s < 86400 * 730 => (s / (86400 * 30), "mo"),
+        s => (s / (86400 * 365), "y"),
+    };
+    format!("{n}{unit}")
 }
 
 /// "3 days ago"-style age of a timestamp.

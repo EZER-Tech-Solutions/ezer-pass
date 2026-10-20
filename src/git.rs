@@ -260,6 +260,30 @@ pub fn log(store_root: &Path, limit: usize) -> Result<Vec<Commit>> {
     Ok(commits)
 }
 
+/// The newest `limit` commits touching `pathspec`, newest first, as
+/// (commit time, subject). `follow` tracks a single file across renames.
+pub fn path_log(
+    store_root: &Path,
+    pathspec: &str,
+    follow: bool,
+    limit: usize,
+) -> Result<Vec<(u64, String)>> {
+    let limit = format!("-n{limit}");
+    let mut args = vec!["log", &limit, "--format=%ct%x1f%s"];
+    if follow {
+        args.push("--follow");
+    }
+    args.extend(["--", pathspec]);
+    let out = quiet(store_root, &args)?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let (time, subject) = line.split_once('\x1f')?;
+            Some((time.parse().unwrap_or(0), subject.to_string()))
+        })
+        .collect())
+}
+
 /// Commits not yet on the upstream; empty without one.
 pub fn unpushed(store_root: &Path) -> HashSet<String> {
     quiet(store_root, &["rev-list", "@{upstream}..HEAD"])

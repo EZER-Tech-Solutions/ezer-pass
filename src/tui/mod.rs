@@ -7,6 +7,7 @@ mod fuzzy;
 mod generate;
 mod history;
 mod palette;
+mod preview;
 mod sync;
 mod ui;
 
@@ -39,6 +40,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         app.tick();
         if let Some(effect) = app.next.take() {
             perform(terminal, app, effect)?;
+        }
+        if ui::preview_fits(terminal.size()?.width) {
+            app.load_preview();
+        } else {
+            app.preview = None;
         }
         terminal.draw(|f| ui::draw(f, app))?;
         // Wake periodically so a revealed password re-masks on time, and

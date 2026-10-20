@@ -2,6 +2,7 @@ use super::fuzzy;
 use super::generate::{self, Field, Form};
 use super::history::{self, History};
 use super::palette;
+use super::preview::Preview;
 use super::sync::{Op, Sync};
 use crate::commands::{self, COMMANDS, Session};
 use crate::context::{self, Context};
@@ -235,6 +236,8 @@ pub struct App {
     pub next: Option<Effect>,
     /// Name the context in the header: there is more than one.
     pub show_context: bool,
+    /// The highlighted row's details, on terminals wide enough to show them.
+    pub preview: Option<Preview>,
 }
 
 impl App {
@@ -265,6 +268,7 @@ impl App {
             switch_to: None,
             next: None,
             show_context: false,
+            preview: None,
         };
         app.count_contexts();
         app.refresh_git();
@@ -277,6 +281,22 @@ impl App {
 
     pub fn selected(&self) -> Option<&Row> {
         self.list.selected().and_then(|i| self.rows.get(i))
+    }
+
+    /// Load the preview pane for the highlighted row, if it moved or the
+    /// row changed.
+    pub fn load_preview(&mut self) {
+        let Some(row) = self.selected() else {
+            self.preview = None;
+            return;
+        };
+        let (path, is_dir) = (row.path.clone(), row.is_dir);
+        self.preview = Some(Preview::load(
+            self.preview.take(),
+            &self.sess,
+            &path,
+            is_dir,
+        ));
     }
 
     fn selected_path(&self) -> Option<String> {
@@ -393,6 +413,8 @@ impl App {
     }
 
     pub fn refresh_git(&mut self) {
+        // Whatever changed the store may have changed the preview's row.
+        self.preview = None;
         self.upstream = git::upstream(self.sess.store.root());
         self.ahead = if self.upstream.is_some() {
             git::ahead_count(self.sess.store.root())

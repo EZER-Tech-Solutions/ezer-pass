@@ -15,7 +15,7 @@ const LIMIT: usize = 500;
 
 /// Commits ezer-pass makes for its file index, hidden from the view: the
 /// commit they follow tells the story.
-const INDEX_SUBJECT: &str = "Update ezer-pass file index.";
+pub const INDEX_SUBJECT: &str = "Update ezer-pass file index.";
 
 pub struct History {
     pub commits: Vec<Commit>,

@@ -65,7 +65,10 @@ a root row named after the context, so creating, pasting and the rest work at
 the top level like in any folder (`r` on it renames the context). The bottom
 pane shows your recently used entries (with a countdown while one is on the
 clipboard), details of the highlighted row, the cut/copy buffer, marks, and git
-sync state. The footer shows only the keys that do something right now: they
+sync state. In a terminal 110 columns or wider, a preview pane beside the tree
+takes over the highlighted row's details: who a folder is encrypted to, an
+entry's lines after its password (once the identity is unlocked; the password
+itself stays masked), and the commits that touched it. The footer shows only the keys that do something right now: they
 change with the highlighted row (password, file, folder), and while items are
 marked or cut.
 

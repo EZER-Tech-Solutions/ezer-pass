@@ -5,6 +5,7 @@ use super::palette;
 use super::sync::{Op, Sync};
 use crate::commands::{self, COMMANDS, Session};
 use crate::crypto::{self, WrongPassphrase};
+use crate::password::Spec;
 use crate::{clipboard, fileio, git, index, repl, store};
 use age::secrecy::SecretString;
 use anyhow::Result;
@@ -38,7 +39,7 @@ pub enum Effect {
     /// Generate a password straight to the clipboard (the `g` form).
     Generate {
         path: String,
-        kind: Option<&'static str>,
+        spec: Spec,
         length: u32,
         in_place: bool,
     },
@@ -488,13 +489,22 @@ impl App {
     }
 
     /// Keys for the generate form: Tab and ↑↓ between fields, ←→ (or
-    /// space) through the types, digits or ←→ +- for the length.
+    /// space) through the types, digits or ←→ +- for the length, space
+    /// (or ←→) to toggle look-alikes.
     fn generate_key(&mut self, key: KeyEvent) -> Effect {
         let Mode::Generate(form) = &mut self.mode else {
             return Effect::None;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let before = (form.name.text.clone(), form.kind, form.length.text.clone());
+        let state = |f: &Form| {
+            (
+                f.name.text.clone(),
+                f.kind,
+                f.length.text.clone(),
+                f.no_look_alikes,
+            )
+        };
+        let before = state(form);
         match (form.field, key.code) {
             (_, KeyCode::Esc) => {
                 self.mode = Mode::Browse;
@@ -518,10 +528,14 @@ impl App {
             (Field::Length, _) => {
                 form.length.handle(key);
             }
+            (
+                Field::LookAlikes,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ' | 'h' | 'l' | 'x'),
+            ) => form.no_look_alikes = !form.no_look_alikes,
             _ => {}
         }
         // Any change takes back an "⏎ again to replace" warning.
-        if before != (form.name.text.clone(), form.kind, form.length.text.clone()) {
+        if before != state(form) {
             form.error = None;
             form.overwrite = false;
         }
@@ -563,11 +577,11 @@ impl App {
             return Effect::None;
         }
         form.save_prefs();
-        let kind = generate::KINDS[form.kind].1;
+        let spec = form.spec();
         self.mode = Mode::Browse;
         Effect::Generate {
             path,
-            kind,
+            spec,
             length,
             in_place,
         }

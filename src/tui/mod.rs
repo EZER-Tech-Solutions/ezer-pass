@@ -106,11 +106,11 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
         }
         Effect::Generate {
             path,
-            kind,
+            spec,
             length,
             in_place,
         } => {
-            let result = commands::generate(&mut app.sess, &path, kind, length as usize, in_place)
+            let result = commands::generate(&mut app.sess, &path, &spec, length as usize, in_place)
                 .and_then(|password| clipboard::copy(&password));
             let next = app.finish_generate(path, result);
             perform(terminal, app, next)?;

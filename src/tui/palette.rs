@@ -34,7 +34,7 @@ impl Spec {
 pub const SPECS: &[Spec] = &[
     spec(
         "generate",
-        "[-n] [-i] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
+        "[-n|--url-safe|--digits|--hex] [--no-ambiguous] [-i] <entry> [len]",
         "generate a password",
         Arg::Path,
     ),

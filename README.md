@@ -75,7 +75,7 @@ highlighted row (password, file, folder), and while items are marked or cut.
 | `d` | delete the marked (or highlighted) items, after asking |
 | `u` | history: undo any past change, or roll the store back to a point |
 | `e` | edit in `$VISUAL` / `$EDITOR` |
-| `g` | generate a password in the highlighted folder: pick name, type (symbols, letters & digits, url-safe, hex, digits, base-64) and length; it goes straight to the clipboard and opens masked, never printed. Type and length are remembered; on an existing entry it replaces only the password line |
+| `g` | generate a password in the highlighted folder: pick name, type (symbols, letters & digits, url-safe, digits, hex), length (its strength in bits is shown) and whether to avoid look-alikes like `0O1lI`; it goes straight to the clipboard and opens masked, never printed. These settings are remembered; on an existing entry it replaces only the password line |
 | `i` `m` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
 | `Esc` | clear the filter, then marks, then the buffer |
@@ -134,7 +134,7 @@ hunter2
 | `mkdir <path>` | create a directory (git tracks it once it holds an entry) |
 | `show [-c] <entry>` | print an entry, or `-c` to copy its first line (cleared after 45 s) |
 | `insert [-m] [-e] [-f] <entry>` | add an entry: asks twice without echo; `-m` several lines, `-e` echo |
-| `generate [-n] [-c] [-i] [-f] [--url-safe\|--hex\|--digits\|--base-64] <entry> [len]` | generate a password; `-c` copies instead of printing, `-i` replaces only the first line |
+| `generate [-n\|--url-safe\|--digits\|--hex] [--no-ambiguous] [--exclude=CHARS] [-c] [-i] [-f] <entry> [len]` | generate a password; `-c` copies instead of printing, `-i` replaces only the first line. Symbols by default; `-n` letters and digits, `--url-safe` adds only `-_` (for database URLs and `.env` files), `--digits` for PINs, `--hex` for tokens. It always holds a capital, a small letter, a digit (and a symbol, for the default) when long enough. `--no-ambiguous` leaves out `0O1lI\|`, `--exclude` any characters a site refuses |
 | `edit <entry>` | edit in `$VISUAL` / `$EDITOR`, via a private file in `/dev/shm` that is wiped afterwards |
 | `rm [-r] [-f] <path>` | remove an entry or directory |
 | `mv [-f] <src> <dest>` / `cp [-f] <src> <dest>` | rename or copy, re-encrypting for the new folder's recipients if they differ |

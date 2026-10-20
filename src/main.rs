@@ -9,6 +9,7 @@ mod crypto;
 mod fileio;
 mod git;
 mod index;
+mod password;
 mod repl;
 mod setup;
 mod store;

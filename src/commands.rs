@@ -1,4 +1,5 @@
 use crate::crypto::{self, Keys};
+use crate::password::{Kind, Spec};
 use crate::store::{self, EXT};
 use crate::{clipboard, fileio, git, index, setup};
 use anyhow::{Context, Result, bail};
@@ -250,7 +251,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n] [-c] [-f] [-i] [--url-safe|--hex|--digits|--base-64] <entry> [length]",
+                "generate [-n|--url-safe|--digits|--hex] [--no-ambiguous] [--exclude=CHARS] [-c] [-f] [-i] <entry> [length]",
                 1,
                 2,
             )?;
@@ -375,21 +376,6 @@ fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
     Ok(())
 }
 
-const ALNUM: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-/// The characters a generated password is drawn from, for a `-n` or
-/// charset flag (`None`: letters, digits and symbols).
-fn charset(kind: Option<&str>) -> String {
-    match kind {
-        Some("-n" | "--no-symbols") => ALNUM.into(),
-        Some("--url-safe") => format!("{ALNUM}-_"),
-        Some("--hex") => "0123456789abcdef".into(),
-        Some("--digits") => "0123456789".into(),
-        Some("--base-64") => format!("{ALNUM}+/"),
-        _ => format!("{ALNUM}!\"#$%&'()*+,-./:;<=>?@[\\]^_`{{|}}~"),
-    }
-}
-
 /// The length a generated password has unless told otherwise.
 pub fn default_length() -> u32 {
     std::env::var("PASSWORD_STORE_GENERATED_LENGTH")
@@ -398,18 +384,17 @@ pub fn default_length() -> u32 {
         .unwrap_or(25)
 }
 
-/// Generate a password into `path` and commit it. `kind` is `-n` or a
-/// charset flag. `in_place` replaces only the first line of an existing
+/// Generate a password into `path` and commit it. `in_place` replaces only the first line of an existing
 /// entry, keeping the rest. Returns the password, for the caller to copy
 /// or show.
 pub fn generate(
     sess: &mut Session,
     path: &str,
-    kind: Option<&str>,
+    spec: &Spec,
     length: usize,
     in_place: bool,
 ) -> Result<Zeroizing<String>> {
-    let password = crypto::random_password(&charset(kind), length)?;
+    let password = spec.generate(length)?;
     let content = if in_place {
         let old = sess.read(path)?;
         let rest = old.split_once('\n').map_or("", |(_, rest)| rest);
@@ -430,19 +415,29 @@ pub fn generate(
 
 fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result<()> {
     let has = |names: &[&str]| flags.iter().any(|f| names.contains(f));
-    let kinds: Vec<&str> = flags
-        .iter()
-        .copied()
-        .filter(|f| matches!(*f, "--url-safe" | "--hex" | "--digits" | "--base-64"))
-        .collect();
+    // An unknown flag (an old `--base-64`) must not quietly give symbols.
+    if let Some(f) = flags.iter().find(|f| {
+        Kind::from_flag(f).is_none()
+            && !f.starts_with("--exclude=")
+            && !matches!(
+                **f,
+                "-c" | "--clip" | "-f" | "--force" | "-i" | "--in-place" | "--no-ambiguous"
+            )
+    }) {
+        bail!("unknown option {f}");
+    }
+    let kinds: Vec<Kind> = flags.iter().filter_map(|f| Kind::from_flag(f)).collect();
     if kinds.len() > 1 {
-        bail!("only one of --url-safe, --hex, --digits, --base-64 may be given");
+        bail!("pick one type: -n, --url-safe, --digits or --hex");
     }
-    let no_symbols = has(&["-n", "--no-symbols"]);
-    if no_symbols && !kinds.is_empty() {
-        bail!("-n and {} pick different characters; drop one", kinds[0]);
-    }
-    let kind = kinds.first().copied().or(no_symbols.then_some("-n"));
+    let spec = Spec {
+        kind: kinds.first().copied().unwrap_or(Kind::Symbols),
+        no_look_alikes: has(&["--no-ambiguous"]),
+        exclude: flags
+            .iter()
+            .filter_map(|f| f.strip_prefix("--exclude="))
+            .collect(),
+    };
     let path = sess.resolve(positional[0]);
     let length = match positional.get(1) {
         Some(n) => n
@@ -470,7 +465,7 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
     {
         return Ok(());
     }
-    let password = generate(sess, &path, kind, length, in_place)?;
+    let password = generate(sess, &path, &spec, length, in_place)?;
     if has(&["-c", "--clip"]) {
         clipboard::copy(&password)?;
         println!(
@@ -1108,8 +1103,16 @@ fn print_help() {
         "add an entry (-m several lines, -e echo)",
     );
     entry(
-        "generate [-n] [-c] [-i] [-f] [--url-safe|--hex|--digits|--base-64] <entry> [len]",
-        "generate a password (-i replaces only the first line)",
+        "generate [-c] [-i] [-f] <entry> [len]",
+        "generate a password (-c copy it, -i replace only the first line)",
+    );
+    entry(
+        "  -n | --url-safe | --digits | --hex",
+        "letters & digits, or for database URLs, PINs, tokens",
+    );
+    entry(
+        "  --no-ambiguous --exclude=CHARS",
+        "leave out look-alikes (0O1lI|) or the characters given",
     );
     entry("edit <entry>", "edit in $VISUAL / $EDITOR");
     entry("rm [-r] [-f] <path>", "remove an entry or folder");

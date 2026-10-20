@@ -1,8 +1,9 @@
 use super::app::{App, Confirm, Mode, Row, Secret, Unlock, basename};
-use super::generate::{self, Field, Form};
+use super::generate::{Field, Form};
 use super::history;
 use super::palette;
 use super::sync::{Op, Sync};
+use crate::password::{Kind, LOOK_ALIKES};
 use crate::{index, store};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -1358,7 +1359,8 @@ fn draw_generate(f: &mut Frame, form: &Form) {
 
     let mut kind = label("type", Field::Kind);
     // Every option keeps its padding, so nothing shifts as the choice moves.
-    for (i, (k, _)) in generate::KINDS.iter().enumerate() {
+    for (i, k) in Kind::ALL.iter().enumerate() {
+        let k = k.name();
         kind.push(if i == form.kind {
             format!(" {k} ").fg(ACCENT).bg(SHADE).bold()
         } else {
@@ -1369,6 +1371,25 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     let mut length = label("length", Field::Length);
     length.push(form.length.text.clone().bold());
     length.push("  characters".dim());
+    if let Some(n) = form.length() {
+        let bits = form.spec().bits(n as usize).floor();
+        // Below 64 bits a password falls to an offline guessing attack; a
+        // PIN is short on purpose, guarded by whatever asks for it.
+        length.push(if bits < 64.0 && Kind::ALL[form.kind] != Kind::Digits {
+            format!(" · {bits} bits, weak").fg(MARK)
+        } else {
+            format!(" · {bits} bits").dim()
+        });
+    }
+
+    let mut look_alikes = label("avoid", Field::LookAlikes);
+    let shown: Vec<String> = LOOK_ALIKES.chars().map(String::from).collect();
+    look_alikes.push(if form.no_look_alikes {
+        "[x]".fg(ACCENT).bold()
+    } else {
+        "[ ]".dim()
+    });
+    look_alikes.push(format!(" look-alikes  {}", shown.join(" ")).dim());
 
     let mut lines = vec![
         Line::from(name),
@@ -1376,6 +1397,8 @@ fn draw_generate(f: &mut Frame, form: &Form) {
         Line::from(kind),
         "".into(),
         Line::from(length),
+        "".into(),
+        Line::from(look_alikes),
     ];
     lines.push("".into());
     lines.push(match &form.error {
@@ -1399,6 +1422,12 @@ fn draw_generate(f: &mut Frame, form: &Form) {
             ("⏎", "generate"),
             ("esc", "cancel"),
         ]),
+        Field::LookAlikes => hint(&[
+            ("space", "toggle"),
+            ("tab", "next"),
+            ("⏎", "generate"),
+            ("esc", "cancel"),
+        ]),
         Field::Name => hint(&[("tab", "next"), ("⏎", "generate"), ("esc", "cancel")]),
     };
     keys.spans.insert(0, " ".into());
@@ -1416,7 +1445,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     let (row, col) = match form.field {
         Field::Name => (0, folder.chars().count() + form.name.cursor_col()),
         Field::Length => (4, form.length.cursor_col()),
-        Field::Kind => return,
+        Field::Kind | Field::LookAlikes => return,
     };
     let x = inner.x + 1 + 8 + col as u16;
     f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y + row));

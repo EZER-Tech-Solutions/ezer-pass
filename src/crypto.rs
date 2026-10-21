@@ -204,6 +204,22 @@ pub fn random_password(chars: &str, length: usize) -> Result<Zeroizing<String>> 
     Ok(out)
 }
 
+/// A uniformly random number below `n`.
+pub fn random_below(n: usize) -> Result<usize> {
+    let n = n as u64;
+    // Draws at or past the last whole multiple of `n` would favour the
+    // smallest numbers, so they are thrown away.
+    let limit = (1u64 << 32) - (1u64 << 32) % n;
+    loop {
+        let mut buf = [0u8; 4];
+        getrandom::fill(&mut buf).map_err(|e| anyhow!("no randomness from the OS: {e}"))?;
+        let draw = u32::from_le_bytes(buf) as u64;
+        if draw < limit {
+            return Ok((draw % n) as usize);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

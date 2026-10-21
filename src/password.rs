@@ -1,7 +1,7 @@
 //! What a generated password is made of: a type's groups of characters,
 //! less look-alikes and any excluded characters, holding at least one of
 //! each group a site would check for (capitals, small letters, digits,
-//! symbols).
+//! symbols) — or, for a passphrase, words from the EFF's large list.
 
 use crate::crypto;
 use anyhow::{Result, bail};
@@ -14,6 +14,12 @@ const SYMBOLS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
 /// Characters easily mistaken for one another when read off a screen.
 pub const LOOK_ALIKES: &str = "0O1lI|";
+
+/// The EFF's large diceware list: 7776 words, one per line.
+const WORDS: &str = include_str!("wordlist.txt");
+
+/// How many words a passphrase has unless told otherwise.
+pub const DEFAULT_WORDS: u32 = 7;
 
 /// A type of password.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,15 +34,18 @@ pub enum Kind {
     /// A PIN.
     Digits,
     Hex,
+    /// Words joined by `-`, easy to type and remember.
+    Passphrase,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::Symbols,
         Kind::Alnum,
         Kind::UrlSafe,
         Kind::Digits,
         Kind::Hex,
+        Kind::Passphrase,
     ];
 
     pub fn name(self) -> &'static str {
@@ -46,6 +55,15 @@ impl Kind {
             Kind::UrlSafe => "url-safe",
             Kind::Digits => "digits",
             Kind::Hex => "hex",
+            Kind::Passphrase => "passphrase",
+        }
+    }
+
+    /// What its length counts.
+    pub fn unit(self) -> &'static str {
+        match self {
+            Kind::Passphrase => "words",
+            _ => "characters",
         }
     }
 
@@ -56,6 +74,7 @@ impl Kind {
             "--url-safe" => Some(Kind::UrlSafe),
             "--digits" => Some(Kind::Digits),
             "--hex" => Some(Kind::Hex),
+            "--passphrase" => Some(Kind::Passphrase),
             _ => None,
         }
     }
@@ -74,6 +93,7 @@ impl Kind {
             Kind::UrlSafe => &[(UPPER, true), (LOWER, true), (DIGITS, true), ("-_", false)],
             Kind::Digits => &[(DIGITS, false)],
             Kind::Hex => &[("0123456789abcdef", false)],
+            Kind::Passphrase => &[],
         }
     }
 }
@@ -122,6 +142,9 @@ impl Spec {
 
     /// About how strong a password of `length` is, in bits.
     pub fn bits(&self, length: usize) -> f64 {
+        if self.kind == Kind::Passphrase {
+            return (WORDS.lines().count() as f64).log2() * length as f64;
+        }
         match self.chars().len() {
             0 | 1 => 0.0,
             n => (n as f64).log2() * length as f64,
@@ -129,6 +152,9 @@ impl Spec {
     }
 
     pub fn generate(&self, length: usize) -> Result<Zeroizing<String>> {
+        if self.kind == Kind::Passphrase {
+            return passphrase(length);
+        }
         let groups = self.groups();
         let chars: String = groups.iter().map(|(c, _)| c.as_str()).collect();
         if chars.is_empty() {
@@ -156,6 +182,19 @@ impl Spec {
         }
         bail!("couldn't make a password with every kind of character in it; make it longer")
     }
+}
+
+/// `length` words from the list, joined by `-`.
+fn passphrase(length: usize) -> Result<Zeroizing<String>> {
+    let words: Vec<&str> = WORDS.lines().collect();
+    let mut out = Zeroizing::new(String::new());
+    for i in 0..length {
+        if i > 0 {
+            out.push('-');
+        }
+        out.push_str(words[crypto::random_below(words.len())?]);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -219,5 +258,16 @@ mod tests {
     fn strength() {
         assert_eq!(Spec::new(Kind::Hex).bits(10), 40.0);
         assert!((Spec::new(Kind::Symbols).bits(25) - 163.9).abs() < 0.1);
+        assert!((Spec::new(Kind::Passphrase).bits(6) - 77.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn passphrases_are_words_from_the_list() {
+        assert_eq!(WORDS.lines().count(), 7776);
+        let pw = Spec::new(Kind::Passphrase).generate(6).unwrap();
+        // A few listed words (`yo-yo`) hold a `-` themselves.
+        let pieces: Vec<&str> = WORDS.lines().flat_map(|w| w.split('-')).collect();
+        assert!(pw.split('-').all(|p| pieces.contains(&p)), "{}", *pw);
+        assert!(pw.split('-').count() >= 6);
     }
 }

@@ -1,7 +1,7 @@
 //! The `g` form: name, type, length and look-alikes for a new password.
 
 use super::app::Input;
-use crate::password::{Kind, Spec};
+use crate::password::{DEFAULT_WORDS, Kind, Spec};
 use crate::repl;
 
 pub const MAX_LENGTH: u32 = 4096;
@@ -23,7 +23,10 @@ pub struct Form {
     pub name: Input,
     /// An index into `Kind::ALL`.
     pub kind: usize,
+    /// The length in characters, for every type but a passphrase.
     pub length: Input,
+    /// The length in words, for a passphrase.
+    pub words: Input,
     pub no_look_alikes: bool,
     pub field: Field,
     pub error: Option<String>,
@@ -35,12 +38,13 @@ impl Form {
     /// A form for a new password in `folder`, with the settings used last
     /// time.
     pub fn new(folder: String) -> Self {
-        let (kind, length, no_look_alikes) = load_prefs();
+        let (kind, length, no_look_alikes, words) = load_prefs();
         Form {
             folder,
             name: Input::default(),
             kind,
             length: Input::new(length.to_string()),
+            words: Input::new(words.to_string()),
             no_look_alikes,
             field: Field::Name,
             error: None,
@@ -63,8 +67,29 @@ impl Form {
         };
     }
 
+    fn passphrase(&self) -> bool {
+        Kind::ALL[self.kind] == Kind::Passphrase
+    }
+
+    /// The length field the type uses.
+    pub fn length_input(&self) -> &Input {
+        if self.passphrase() {
+            &self.words
+        } else {
+            &self.length
+        }
+    }
+
+    pub fn length_input_mut(&mut self) -> &mut Input {
+        if self.passphrase() {
+            &mut self.words
+        } else {
+            &mut self.length
+        }
+    }
+
     pub fn length(&self) -> Option<u32> {
-        self.length
+        self.length_input()
             .text
             .parse()
             .ok()
@@ -72,8 +97,9 @@ impl Form {
     }
 
     pub fn nudge_length(&mut self, delta: i64) {
-        let n = self.length.text.parse::<i64>().unwrap_or(0) + delta;
-        self.length = Input::new(n.clamp(1, MAX_LENGTH as i64).to_string());
+        let input = self.length_input_mut();
+        let n = input.text.parse::<i64>().unwrap_or(0) + delta;
+        *input = Input::new(n.clamp(1, MAX_LENGTH as i64).to_string());
     }
 
     /// What the password is drawn from.
@@ -85,7 +111,18 @@ impl Form {
     }
 
     pub fn save_prefs(&self) {
-        if let (Some(path), Some(length)) = (repl::state_file("generate"), self.length()) {
+        let valid = |input: &Input| {
+            input
+                .text
+                .parse::<u32>()
+                .ok()
+                .filter(|n| (1..=MAX_LENGTH).contains(n))
+        };
+        if let (Some(path), Some(length), Some(words)) = (
+            repl::state_file("generate"),
+            valid(&self.length),
+            valid(&self.words),
+        ) {
             let look_alikes = if self.no_look_alikes {
                 "no-ambiguous"
             } else {
@@ -93,15 +130,19 @@ impl Form {
             };
             let _ = std::fs::write(
                 path,
-                format!("{}\n{length}\n{look_alikes}\n", Kind::ALL[self.kind].name()),
+                format!(
+                    "{}\n{length}\n{look_alikes}\n{words}\n",
+                    Kind::ALL[self.kind].name()
+                ),
             );
         }
     }
 }
 
-/// The last type, length and look-alike setting used, else symbols, the
-/// default length and look-alikes allowed.
-fn load_prefs() -> (usize, u32, bool) {
+/// The last type, length, look-alike setting and word count used, else
+/// symbols, the default length, look-alikes allowed and the default word
+/// count.
+fn load_prefs() -> (usize, u32, bool, u32) {
     let default_length = crate::commands::default_length();
     let saved = repl::state_file("generate").and_then(|p| std::fs::read_to_string(p).ok());
     let mut lines = saved.as_deref().unwrap_or("").lines();
@@ -115,7 +156,12 @@ fn load_prefs() -> (usize, u32, bool) {
         .filter(|n| (1..=MAX_LENGTH).contains(n))
         .unwrap_or(default_length);
     let no_look_alikes = lines.next() == Some("no-ambiguous");
-    (kind, length, no_look_alikes)
+    let words = lines
+        .next()
+        .and_then(|l| l.parse().ok())
+        .filter(|n| (1..=MAX_LENGTH).contains(n))
+        .unwrap_or(DEFAULT_WORDS);
+    (kind, length, no_look_alikes, words)
 }
 
 #[cfg(test)]
@@ -129,6 +175,7 @@ mod tests {
             name: Input::default(),
             kind: 0,
             length: Input::new("25".into()),
+            words: Input::new("6".into()),
             no_look_alikes: false,
             field: Field::Name,
             error: None,
@@ -146,5 +193,11 @@ mod tests {
         assert_eq!(f.kind, Kind::ALL.len() - 1);
         f.nudge_length(-100);
         assert_eq!(f.length(), Some(1));
+        // Back to symbols, then round to a passphrase: words count apart.
+        f.cycle_kind(false);
+        assert_eq!(f.length(), Some(25));
+        f.cycle_kind(true);
+        assert_eq!(f.length(), Some(1));
+        assert_eq!(f.length.text, "25");
     }
 }

@@ -575,6 +575,7 @@ impl App {
                 f.name.text.clone(),
                 f.kind,
                 f.length.text.clone(),
+                f.words.text.clone(),
                 f.no_look_alikes,
             )
         };
@@ -600,7 +601,7 @@ impl App {
             (Field::Length, KeyCode::Right | KeyCode::Char('+' | '=')) => form.nudge_length(1),
             (Field::Length, KeyCode::Char(c)) if !c.is_ascii_digit() => {}
             (Field::Length, _) => {
-                form.length.handle(key);
+                form.length_input_mut().handle(key);
             }
             (
                 Field::LookAlikes,

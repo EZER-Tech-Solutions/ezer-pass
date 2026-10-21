@@ -1,6 +1,6 @@
 use crate::context;
 use crate::crypto::{self, Keys};
-use crate::password::{Kind, Spec};
+use crate::password::{self, Kind, Spec};
 use crate::store::{self, EXT};
 use crate::{agent, clipboard, fileio, git, index, setup};
 use anyhow::{Context, Result, bail};
@@ -271,7 +271,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n|--url-safe|--digits|--hex] [--no-ambiguous] [--exclude=CHARS] [-c] [-f] [-i] <entry> [length]",
+                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [-c] [-f] [-i] <entry> [length]",
                 1,
                 2,
             )?;
@@ -595,7 +595,7 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
     }
     let kinds: Vec<Kind> = flags.iter().filter_map(|f| Kind::from_flag(f)).collect();
     if kinds.len() > 1 {
-        bail!("pick one type: -n, --url-safe, --digits or --hex");
+        bail!("pick one type: -n, --url-safe, --digits, --hex or --passphrase");
     }
     let spec = Spec {
         kind: kinds.first().copied().unwrap_or(Kind::Symbols),
@@ -605,6 +605,9 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
             .filter_map(|f| f.strip_prefix("--exclude="))
             .collect(),
     };
+    if spec.kind == Kind::Passphrase && (spec.no_look_alikes || !spec.exclude.is_empty()) {
+        bail!("--no-ambiguous and --exclude don't apply to a passphrase");
+    }
     let path = sess.resolve(positional[0]);
     let length = match positional.get(1) {
         Some(n) => n
@@ -612,6 +615,7 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
             .ok()
             .filter(|n| *n > 0)
             .with_context(|| format!("length must be a positive number, not {n:?}"))?,
+        None if spec.kind == Kind::Passphrase => password::DEFAULT_WORDS as usize,
         None => default_length() as usize,
     };
     if sess.store.is_dir(&path) {
@@ -1483,6 +1487,10 @@ fn print_help() {
     entry(
         "  -n | --url-safe | --digits | --hex",
         "letters & digits, or for database URLs, PINs, tokens",
+    );
+    entry(
+        "  --passphrase",
+        "words joined by - (len counts words, default 7)",
     );
     entry(
         "  --no-ambiguous --exclude=CHARS",

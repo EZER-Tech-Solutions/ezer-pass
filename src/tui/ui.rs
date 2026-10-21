@@ -1659,13 +1659,14 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     }
 
     let mut length = label("length", Field::Length);
-    length.push(form.length.text.clone().bold());
-    length.push("  characters".dim());
+    let chosen = Kind::ALL[form.kind];
+    length.push(form.length_input().text.clone().bold());
+    length.push(format!("  {}", chosen.unit()).dim());
     if let Some(n) = form.length() {
         let bits = form.spec().bits(n as usize).floor();
         // Below 64 bits a password falls to an offline guessing attack; a
         // PIN is short on purpose, guarded by whatever asks for it.
-        length.push(if bits < 64.0 && Kind::ALL[form.kind] != Kind::Digits {
+        length.push(if bits < 64.0 && chosen != Kind::Digits {
             format!(" · {bits} bits, weak").fg(MARK)
         } else {
             format!(" · {bits} bits").dim()
@@ -1680,6 +1681,9 @@ fn draw_generate(f: &mut Frame, form: &Form) {
         "[ ]".dim()
     });
     look_alikes.push(format!(" look-alikes  {}", shown.join(" ")).dim());
+    if chosen == Kind::Passphrase {
+        look_alikes.push("  (not for passphrases)".dim());
+    }
 
     let mut lines = vec![
         Line::from(name),
@@ -1734,7 +1738,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     // The cursor sits in whichever text field is focused.
     let (row, col) = match form.field {
         Field::Name => (0, folder.chars().count() + form.name.cursor_col()),
-        Field::Length => (4, form.length.cursor_col()),
+        Field::Length => (4, form.length_input().cursor_col()),
         Field::Kind | Field::LookAlikes => return,
     };
     let x = inner.x + 1 + 8 + col as u16;

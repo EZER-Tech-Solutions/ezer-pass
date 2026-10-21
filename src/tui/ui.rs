@@ -33,6 +33,8 @@ const MASK: &str = "••••••••••••";
 const BAR: &str = "▌";
 /// The dark grey behind the title chips and the highlighted row.
 const SHADE: Color = Color::Indexed(236);
+/// Behind the popup input fields; darker than `SHADE` so it stays quiet.
+const FIELD: Color = Color::Indexed(234);
 /// Pane borders.
 const BORDER: Color = Color::Indexed(242);
 /// Width of the label column in the info pane.
@@ -105,67 +107,53 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 /// The passphrase popup: one masked field, then the held action runs.
 fn draw_unlock(f: &mut Frame, u: &Unlock) {
-    let dots = "•".repeat(u.input.text.chars().count());
+    let len = u.input.text.chars().count();
     let status = match (&u.error, u.working) {
         (_, true) => Line::from("unlocking…".fg(UNLOCK)),
         (Some(e), _) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
         (None, _) => "once per session; kept in memory only".dim().into(),
     };
-    let lines = vec![
-        Line::from(vec![
-            BAR.fg(UNLOCK),
-            "passphrase ".fg(UNLOCK).bold(),
-            dots.clone().bold(),
-        ]),
-        "".into(),
-        status,
-    ];
+    let width = 56.min(f.area().width);
+    let (prompt, col) = input_line("passphrase: ", len, len, '\u{f023}', width);
+    let lines = vec![prompt, "".into(), status];
     let mut keys = hint_in(&[("⏎", "unlock"), ("esc", "cancel")], UNLOCK);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
     let block = popup(Line::from(" unlock ").bold(), UNLOCK)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
-    let area = popup_fixed(f.area(), 56.min(f.area().width), lines.len() as u16 + 4);
+    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
     let inner = block.inner(area);
     f.render_widget(Paragraph::new(lines).block(block), area);
     if !u.working {
-        let x = inner.x + 1 + 11 + dots.chars().count() as u16;
-        f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+        f.set_cursor_position((inner.x + col, inner.y));
     }
 }
 
 /// The insert popup: the new entry's value, masked like the passphrase.
 fn draw_insert(f: &mut Frame, ins: &Insert) {
-    let dots = "•".repeat(ins.input.text.chars().count());
     let shown = store::display(&ins.path);
     let status = if ins.exists {
         Line::from(format!("{shown} exists — ⏎ replaces it").fg(MARK))
     } else {
         "encrypted into the store; never shown".dim().into()
     };
-    let lines = vec![
-        Line::from(vec![
-            BAR.fg(UNLOCK),
-            "value ".fg(UNLOCK).bold(),
-            dots.bold(),
-        ]),
-        "".into(),
-        status,
-    ];
+    let width = 56.min(f.area().width);
+    let len = ins.input.text.chars().count();
+    let (prompt, col) = input_line("value: ", len, ins.input.cursor_col(), '\u{f084}', width);
+    let lines = vec![prompt, "".into(), status];
     let mut keys = hint_in(&[("⏎", "save"), ("esc", "cancel")], UNLOCK);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
     let block = popup(Line::from(format!(" insert {shown} ")).bold(), UNLOCK)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
-    let area = popup_fixed(f.area(), 56.min(f.area().width), lines.len() as u16 + 4);
+    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
     let inner = block.inner(area);
     f.render_widget(Paragraph::new(lines).block(block), area);
-    let x = inner.x + 1 + 6 + ins.input.cursor_col() as u16;
-    f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
+    f.set_cursor_position((inner.x + col, inner.y));
 }
 
 fn pane(title: &str) -> Block<'_> {
@@ -1832,6 +1820,34 @@ fn cut_left(text: String, max: usize) -> String {
     } else {
         text
     }
+}
+
+/// A popup's prompt row: `label`, then `len` masking dots shaded across a
+/// `popup_width` popup (less its border and padding), then `icon` at the
+/// right edge. Dots past the field end in `…`. Also returns the column for
+/// a `cursor` that many characters in, kept inside the field.
+fn input_line(
+    label: &'static str,
+    len: usize,
+    cursor: usize,
+    icon: char,
+    popup_width: u16,
+) -> (Line<'static>, u16) {
+    let w = (popup_width as usize).saturating_sub(2 + 3 + label.len() + 1 + 3);
+    let dots = if len > w {
+        "•".repeat(w.saturating_sub(1)) + "…"
+    } else {
+        "•".repeat(len)
+    };
+    let line = Line::from(vec![
+        label.fg(UNLOCK).bold(),
+        format!(" {dots:<w$}").bg(FIELD).bold(),
+        format!("  {icon}").fg(UNLOCK),
+    ]);
+    (
+        line,
+        (label.len() + 1 + cursor.min(w.saturating_sub(1))) as u16,
+    )
 }
 
 /// A centered rect of fixed size, clamped to `area`.

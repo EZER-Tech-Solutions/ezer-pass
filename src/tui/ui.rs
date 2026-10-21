@@ -4,7 +4,7 @@ use super::history;
 use super::palette;
 use super::preview::{Body, Preview};
 use super::sync::{Op, Sync};
-use crate::password::{Kind, LOOK_ALIKES};
+use crate::password::{Kind, LOOK_ALIKES, SEPARATORS, separator_name};
 use crate::{index, store};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Margin, Rect};
@@ -1642,58 +1642,88 @@ fn draw_generate(f: &mut Frame, form: &Form) {
             vec![" ".into(), format!("{name:<8}").dim()]
         }
     };
-    let folder = format!("{}/", store::display(&form.folder).trim_end_matches('/'));
-    let mut name = label("name", Field::Name);
-    name.push(folder.clone().dim());
-    name.push(form.name.text.clone().bold());
-
-    let mut kind = label("type", Field::Kind);
     // Every option keeps its padding, so nothing shifts as the choice moves.
-    for (i, k) in Kind::ALL.iter().enumerate() {
-        let k = k.name();
-        kind.push(if i == form.kind {
-            format!(" {k} ").fg(ACCENT).bg(SHADE).bold()
+    let choice = |name: &str, chosen: bool| -> Span<'static> {
+        if chosen {
+            format!(" {name} ").fg(ACCENT).bg(SHADE).bold()
         } else {
-            format!(" {k} ").dim()
-        });
-    }
-
-    let mut length = label("length", Field::Length);
+            format!(" {name} ").dim()
+        }
+    };
+    let checkbox = |on: bool| -> Span<'static> {
+        if on {
+            "[x]".fg(ACCENT).bold()
+        } else {
+            "[ ]".dim()
+        }
+    };
     let chosen = Kind::ALL[form.kind];
-    length.push(form.length_input().text.clone().bold());
-    length.push(format!("  {}", chosen.unit()).dim());
-    if let Some(n) = form.length() {
-        let bits = form.spec().bits(n as usize).floor();
-        // Below 64 bits a password falls to an offline guessing attack; a
-        // PIN is short on purpose, guarded by whatever asks for it.
-        length.push(if bits < 64.0 && chosen != Kind::Digits {
-            format!(" · {bits} bits, weak").fg(MARK)
-        } else {
-            format!(" · {bits} bits").dim()
-        });
+    let folder = format!("{}/", store::display(&form.folder).trim_end_matches('/'));
+
+    let mut rows: Vec<(Field, Vec<Span<'static>>)> = Vec::new();
+    for &field in form.fields() {
+        let row = match field {
+            Field::Name => {
+                let mut row = label("name", field);
+                row.push(folder.clone().dim());
+                row.push(form.name.text.clone().bold());
+                row
+            }
+            Field::Kind => {
+                let mut row = label("type", field);
+                for (i, k) in Kind::ALL.iter().enumerate() {
+                    row.push(choice(k.name(), i == form.kind));
+                }
+                row
+            }
+            Field::Length => {
+                let mut row = label("length", field);
+                row.push(form.length_input().text.clone().bold());
+                row.push(format!("  {}", chosen.unit()).dim());
+                if let Some(n) = form.length() {
+                    let bits = form.spec().bits(n as usize).floor();
+                    // Below 64 bits a password falls to an offline guessing
+                    // attack; a PIN is short on purpose, guarded by whatever
+                    // asks for it.
+                    row.push(if bits < 64.0 && chosen != Kind::Digits {
+                        format!(" · {bits} bits, weak").fg(MARK)
+                    } else {
+                        format!(" · {bits} bits").dim()
+                    });
+                }
+                row
+            }
+            Field::LookAlikes => {
+                let mut row = label("avoid", field);
+                let shown: Vec<String> = LOOK_ALIKES.chars().map(String::from).collect();
+                row.push(checkbox(form.no_look_alikes));
+                row.push(format!(" look-alikes  {}", shown.join(" ")).dim());
+                row
+            }
+            Field::Separator => {
+                let mut row = label("between", field);
+                for (i, sep) in SEPARATORS.iter().enumerate() {
+                    row.push(choice(separator_name(sep), i == form.separator));
+                }
+                row
+            }
+            Field::Capitalize => {
+                let mut row = label("capitals", field);
+                row.push(checkbox(form.capitalize));
+                row.push(" Capitalize words, end with a digit".dim());
+                row
+            }
+        };
+        rows.push((field, row));
     }
 
-    let mut look_alikes = label("avoid", Field::LookAlikes);
-    let shown: Vec<String> = LOOK_ALIKES.chars().map(String::from).collect();
-    look_alikes.push(if form.no_look_alikes {
-        "[x]".fg(ACCENT).bold()
-    } else {
-        "[ ]".dim()
-    });
-    look_alikes.push(format!(" look-alikes  {}", shown.join(" ")).dim());
-    if chosen == Kind::Passphrase {
-        look_alikes.push("  (not for passphrases)".dim());
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (_, row)) in rows.iter().enumerate() {
+        if i > 0 {
+            lines.push("".into());
+        }
+        lines.push(Line::from(row.clone()));
     }
-
-    let mut lines = vec![
-        Line::from(name),
-        "".into(),
-        Line::from(kind),
-        "".into(),
-        Line::from(length),
-        "".into(),
-        Line::from(look_alikes),
-    ];
     lines.push("".into());
     lines.push(match &form.error {
         Some(e) if form.overwrite => Line::from(e.clone().fg(MARK)),
@@ -1709,8 +1739,8 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     });
 
     let mut keys = match form.field {
-        Field::Kind => hint(&[
-            ("←→", "type"),
+        Field::Kind | Field::Separator => hint(&[
+            ("←→", "choose"),
             ("tab", "next"),
             ("⏎", "generate"),
             ("esc", "cancel"),
@@ -1721,7 +1751,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
             ("⏎", "generate"),
             ("esc", "cancel"),
         ]),
-        Field::LookAlikes => hint(&[
+        Field::LookAlikes | Field::Capitalize => hint(&[
             ("space", "toggle"),
             ("tab", "next"),
             ("⏎", "generate"),
@@ -1735,19 +1765,28 @@ fn draw_generate(f: &mut Frame, form: &Form) {
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
     let width = 82.min(f.area().width);
-    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
+    // Sized for the type with the most fields, so it doesn't jump as the
+    // type changes.
+    let most = 5 * 2 + 1;
+    let area = popup_fixed(f.area(), width, most + 4);
     f.render_widget(Clear, area);
     let inner = block.inner(area);
     f.render_widget(Paragraph::new(lines).block(block), area);
 
     // The cursor sits in whichever text field is focused.
-    let (row, col) = match form.field {
-        Field::Name => (0, folder.chars().count() + form.name.cursor_col()),
-        Field::Length => (4, form.length_input().cursor_col()),
-        Field::Kind | Field::LookAlikes => return,
+    let Some(row) = rows.iter().position(|(field, _)| *field == form.field) else {
+        return;
+    };
+    let col = match form.field {
+        Field::Name => folder.chars().count() + form.name.cursor_col(),
+        Field::Length => form.length_input().cursor_col(),
+        _ => return,
     };
     let x = inner.x + 1 + 8 + col as u16;
-    f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y + row));
+    f.set_cursor_position((
+        x.min(inner.right().saturating_sub(1)),
+        inner.y + row as u16 * 2,
+    ));
 }
 
 /// The `C` popup: every context with its store, the current one marked;

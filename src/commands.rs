@@ -271,7 +271,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [-c] [-f] [-i] [entry] [length]",
+                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [-c] [-f] [-i] [entry] [length]",
                 0,
                 2,
             )?;
@@ -586,9 +586,16 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
     if let Some(f) = flags.iter().find(|f| {
         Kind::from_flag(f).is_none()
             && !f.starts_with("--exclude=")
+            && !f.starts_with("--separator=")
             && !matches!(
                 **f,
-                "-c" | "--clip" | "-f" | "--force" | "-i" | "--in-place" | "--no-ambiguous"
+                "-c" | "--clip"
+                    | "-f"
+                    | "--force"
+                    | "-i"
+                    | "--in-place"
+                    | "--no-ambiguous"
+                    | "--capitalize"
             )
     }) {
         bail!("unknown option {f}");
@@ -604,9 +611,24 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
             .iter()
             .filter_map(|f| f.strip_prefix("--exclude="))
             .collect(),
+        separator: flags
+            .iter()
+            .rev()
+            .find_map(|f| f.strip_prefix("--separator="))
+            .unwrap_or(password::SEPARATORS[0])
+            .into(),
+        capitalize: has(&["--capitalize"]),
     };
     if spec.kind == Kind::Passphrase && (spec.no_look_alikes || !spec.exclude.is_empty()) {
         bail!("--no-ambiguous and --exclude don't apply to a passphrase");
+    }
+    if spec.kind != Kind::Passphrase
+        && (spec.capitalize || flags.iter().any(|f| f.starts_with("--separator=")))
+    {
+        bail!("--capitalize and --separator are for a passphrase (--passphrase)");
+    }
+    if spec.separator.contains(['\n', '\r']) {
+        bail!("the separator can't hold a line break");
     }
     // A lone number is a length: the password is for somewhere else, not
     // an entry.
@@ -1513,6 +1535,10 @@ fn print_help() {
     entry(
         "  --passphrase",
         "words joined by - (len counts words, default 7)",
+    );
+    entry(
+        "  --capitalize --separator=X",
+        "capitalize words and add a digit, or join with X",
     );
     entry(
         "  --no-ambiguous --exclude=CHARS",

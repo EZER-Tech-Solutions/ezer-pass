@@ -21,6 +21,18 @@ const WORDS: &str = include_str!("wordlist.txt");
 /// How many words a passphrase has unless told otherwise.
 pub const DEFAULT_WORDS: u32 = 7;
 
+/// What can go between a passphrase's words, the default first.
+pub const SEPARATORS: [&str; 5] = ["-", " ", ".", "_", ""];
+
+/// A separator as the `g` form shows it.
+pub fn separator_name(separator: &str) -> &str {
+    match separator {
+        " " => "space",
+        "" => "none",
+        s => s,
+    }
+}
+
 /// A type of password.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -34,7 +46,7 @@ pub enum Kind {
     /// A PIN.
     Digits,
     Hex,
-    /// Words joined by `-`, easy to type and remember.
+    /// Words, easy to type and remember.
     Passphrase,
 }
 
@@ -106,6 +118,11 @@ pub struct Spec {
     pub no_look_alikes: bool,
     /// Characters a site won't take.
     pub exclude: String,
+    /// What goes between a passphrase's words.
+    pub separator: String,
+    /// Capitalize a passphrase's words and end it with a digit, for sites
+    /// that demand both.
+    pub capitalize: bool,
 }
 
 impl Spec {
@@ -114,6 +131,8 @@ impl Spec {
             kind,
             no_look_alikes: false,
             exclude: String::new(),
+            separator: SEPARATORS[0].into(),
+            capitalize: false,
         }
     }
 
@@ -143,7 +162,8 @@ impl Spec {
     /// About how strong a password of `length` is, in bits.
     pub fn bits(&self, length: usize) -> f64 {
         if self.kind == Kind::Passphrase {
-            return (WORDS.lines().count() as f64).log2() * length as f64;
+            let digit = if self.capitalize { 10f64.log2() } else { 0.0 };
+            return (WORDS.lines().count() as f64).log2() * length as f64 + digit;
         }
         match self.chars().len() {
             0 | 1 => 0.0,
@@ -153,7 +173,7 @@ impl Spec {
 
     pub fn generate(&self, length: usize) -> Result<Zeroizing<String>> {
         if self.kind == Kind::Passphrase {
-            return passphrase(length);
+            return self.passphrase(length);
         }
         let groups = self.groups();
         let chars: String = groups.iter().map(|(c, _)| c.as_str()).collect();
@@ -182,19 +202,30 @@ impl Spec {
         }
         bail!("couldn't make a password with every kind of character in it; make it longer")
     }
-}
 
-/// `length` words from the list, joined by `-`.
-fn passphrase(length: usize) -> Result<Zeroizing<String>> {
-    let words: Vec<&str> = WORDS.lines().collect();
-    let mut out = Zeroizing::new(String::new());
-    for i in 0..length {
-        if i > 0 {
-            out.push('-');
+    /// `length` words from the list, between each the separator.
+    fn passphrase(&self, length: usize) -> Result<Zeroizing<String>> {
+        let words: Vec<&str> = WORDS.lines().collect();
+        let mut out = Zeroizing::new(String::new());
+        for i in 0..length {
+            if i > 0 {
+                out.push_str(&self.separator);
+            }
+            let word = words[crypto::random_below(words.len())?];
+            if self.capitalize {
+                // Every listed word starts with a small ASCII letter.
+                out.push_str(&word[..1].to_ascii_uppercase());
+                out.push_str(&word[1..]);
+            } else {
+                out.push_str(word);
+            }
         }
-        out.push_str(words[crypto::random_below(words.len())?]);
+        if self.capitalize {
+            out.push_str(&self.separator);
+            out.push(char::from(b'0' + crypto::random_below(10)? as u8));
+        }
+        Ok(out)
     }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -224,6 +255,7 @@ mod tests {
             kind: Kind::Alnum,
             no_look_alikes: true,
             exclude: "aeiou".into(),
+            ..Spec::new(Kind::Alnum)
         };
         let pw = spec.generate(500).unwrap();
         assert!(
@@ -239,6 +271,7 @@ mod tests {
             kind: Kind::Alnum,
             no_look_alikes: false,
             exclude: DIGITS.into(),
+            ..Spec::new(Kind::Alnum)
         };
         assert!(
             spec.generate(3)
@@ -250,6 +283,7 @@ mod tests {
             kind: Kind::Digits,
             no_look_alikes: false,
             exclude: DIGITS.into(),
+            ..Spec::new(Kind::Alnum)
         };
         assert!(none.generate(4).is_err());
     }
@@ -259,6 +293,11 @@ mod tests {
         assert_eq!(Spec::new(Kind::Hex).bits(10), 40.0);
         assert!((Spec::new(Kind::Symbols).bits(25) - 163.9).abs() < 0.1);
         assert!((Spec::new(Kind::Passphrase).bits(6) - 77.5).abs() < 0.1);
+        let capitalized = Spec {
+            capitalize: true,
+            ..Spec::new(Kind::Passphrase)
+        };
+        assert!((capitalized.bits(6) - 80.9).abs() < 0.1);
     }
 
     #[test]
@@ -269,5 +308,23 @@ mod tests {
         let pieces: Vec<&str> = WORDS.lines().flat_map(|w| w.split('-')).collect();
         assert!(pw.split('-').all(|p| pieces.contains(&p)), "{}", *pw);
         assert!(pw.split('-').count() >= 6);
+    }
+
+    #[test]
+    fn capitalized_passphrases_end_in_a_digit() {
+        let spec = Spec {
+            separator: ".".into(),
+            capitalize: true,
+            ..Spec::new(Kind::Passphrase)
+        };
+        let pw = spec.generate(4).unwrap();
+        let parts: Vec<&str> = pw.split('.').collect();
+        assert_eq!(parts.len(), 5, "{}", *pw);
+        assert!(
+            parts[..4]
+                .iter()
+                .all(|w| w.starts_with(|c: char| c.is_ascii_uppercase()))
+        );
+        assert!(parts[4].len() == 1 && parts[4].bytes().all(|b| b.is_ascii_digit()));
     }
 }

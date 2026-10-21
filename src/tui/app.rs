@@ -564,8 +564,8 @@ impl App {
     }
 
     /// Keys for the generate form: Tab and ↑↓ between fields, ←→ (or
-    /// space) through the types, digits or ←→ +- for the length, space
-    /// (or ←→) to toggle look-alikes.
+    /// space) through the types and separators, digits or ←→ +- for the
+    /// length, space (or ←→) to toggle look-alikes and capitals.
     fn generate_key(&mut self, key: KeyEvent) -> Effect {
         let Mode::Generate(form) = &mut self.mode else {
             return Effect::None;
@@ -578,6 +578,8 @@ impl App {
                 f.length.text.clone(),
                 f.words.text.clone(),
                 f.no_look_alikes,
+                f.separator,
+                f.capitalize,
             )
         };
         let before = state(form);
@@ -608,6 +610,14 @@ impl App {
                 Field::LookAlikes,
                 KeyCode::Left | KeyCode::Right | KeyCode::Char(' ' | 'h' | 'l' | 'x'),
             ) => form.no_look_alikes = !form.no_look_alikes,
+            (Field::Separator, KeyCode::Left | KeyCode::Char('h')) => form.cycle_separator(true),
+            (Field::Separator, KeyCode::Right | KeyCode::Char('l' | ' ')) => {
+                form.cycle_separator(false)
+            }
+            (
+                Field::Capitalize,
+                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ' | 'h' | 'l' | 'x'),
+            ) => form.capitalize = !form.capitalize,
             _ => {}
         }
         // Any change takes back an "⏎ again to replace" warning.

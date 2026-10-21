@@ -1,7 +1,8 @@
-//! The `g` form: name, type, length and look-alikes for a new password.
+//! The `g` form: name, type, length and look-alikes (or, for a
+//! passphrase, separator and capitals) for a new password.
 
 use super::app::Input;
-use crate::password::{DEFAULT_WORDS, Kind, Spec};
+use crate::password::{DEFAULT_WORDS, Kind, SEPARATORS, Spec, separator_name};
 use crate::repl;
 
 pub const MAX_LENGTH: u32 = 4096;
@@ -12,10 +13,9 @@ pub enum Field {
     Kind,
     Length,
     LookAlikes,
+    Separator,
+    Capitalize,
 }
-
-/// The fields, top to bottom.
-const FIELDS: [Field; 4] = [Field::Name, Field::Kind, Field::Length, Field::LookAlikes];
 
 pub struct Form {
     /// The folder the name is relative to.
@@ -28,6 +28,9 @@ pub struct Form {
     /// The length in words, for a passphrase.
     pub words: Input,
     pub no_look_alikes: bool,
+    /// An index into `SEPARATORS`.
+    pub separator: usize,
+    pub capitalize: bool,
     pub field: Field,
     pub error: Option<String>,
     /// The entry exists and ⏎ was pressed once: the next ⏎ replaces it.
@@ -38,7 +41,14 @@ impl Form {
     /// A form for a new password in `folder`, with the settings used last
     /// time.
     pub fn new(folder: String) -> Self {
-        let (kind, length, no_look_alikes, words) = load_prefs();
+        let Prefs {
+            kind,
+            length,
+            no_look_alikes,
+            words,
+            separator,
+            capitalize,
+        } = load_prefs();
         Form {
             folder,
             name: Input::default(),
@@ -46,16 +56,43 @@ impl Form {
             length: Input::new(length.to_string()),
             words: Input::new(words.to_string()),
             no_look_alikes,
+            separator,
+            capitalize,
             field: Field::Name,
             error: None,
             overwrite: false,
         }
     }
 
+    /// The fields the type has, top to bottom.
+    pub fn fields(&self) -> &'static [Field] {
+        if self.passphrase() {
+            &[
+                Field::Name,
+                Field::Kind,
+                Field::Length,
+                Field::Separator,
+                Field::Capitalize,
+            ]
+        } else {
+            &[Field::Name, Field::Kind, Field::Length, Field::LookAlikes]
+        }
+    }
+
     pub fn next_field(&mut self, back: bool) {
-        let n = FIELDS.len();
-        let i = FIELDS.iter().position(|f| *f == self.field).unwrap_or(0);
-        self.field = FIELDS[if back { (i + n - 1) % n } else { (i + 1) % n }];
+        let fields = self.fields();
+        let n = fields.len();
+        let i = fields.iter().position(|f| *f == self.field).unwrap_or(0);
+        self.field = fields[if back { (i + n - 1) % n } else { (i + 1) % n }];
+    }
+
+    pub fn cycle_separator(&mut self, back: bool) {
+        let n = SEPARATORS.len();
+        self.separator = if back {
+            (self.separator + n - 1) % n
+        } else {
+            (self.separator + 1) % n
+        };
     }
 
     pub fn cycle_kind(&mut self, back: bool) {
@@ -67,7 +104,7 @@ impl Form {
         };
     }
 
-    fn passphrase(&self) -> bool {
+    pub fn passphrase(&self) -> bool {
         Kind::ALL[self.kind] == Kind::Passphrase
     }
 
@@ -106,6 +143,8 @@ impl Form {
     pub fn spec(&self) -> Spec {
         Spec {
             no_look_alikes: self.no_look_alikes,
+            separator: SEPARATORS[self.separator].into(),
+            capitalize: self.capitalize,
             ..Spec::new(Kind::ALL[self.kind])
         }
     }
@@ -128,21 +167,33 @@ impl Form {
             } else {
                 ""
             };
+            let capitalize = if self.capitalize { "capitalize" } else { "" };
             let _ = std::fs::write(
                 path,
                 format!(
-                    "{}\n{length}\n{look_alikes}\n{words}\n",
-                    Kind::ALL[self.kind].name()
+                    "{}\n{length}\n{look_alikes}\n{words}\n{}\n{capitalize}\n",
+                    Kind::ALL[self.kind].name(),
+                    separator_name(SEPARATORS[self.separator]),
                 ),
             );
         }
     }
 }
 
-/// The last type, length, look-alike setting and word count used, else
-/// symbols, the default length, look-alikes allowed and the default word
-/// count.
-fn load_prefs() -> (usize, u32, bool, u32) {
+/// The form's settings, as used last time.
+struct Prefs {
+    kind: usize,
+    length: u32,
+    no_look_alikes: bool,
+    words: u32,
+    separator: usize,
+    capitalize: bool,
+}
+
+/// The settings used last time, else symbols, the default length,
+/// look-alikes allowed, and a passphrase's default words, `-` and no
+/// capitals.
+fn load_prefs() -> Prefs {
     let default_length = crate::commands::default_length();
     let saved = repl::state_file("generate").and_then(|p| std::fs::read_to_string(p).ok());
     let mut lines = saved.as_deref().unwrap_or("").lines();
@@ -161,7 +212,19 @@ fn load_prefs() -> (usize, u32, bool, u32) {
         .and_then(|l| l.parse().ok())
         .filter(|n| (1..=MAX_LENGTH).contains(n))
         .unwrap_or(DEFAULT_WORDS);
-    (kind, length, no_look_alikes, words)
+    let separator = lines
+        .next()
+        .and_then(|s| SEPARATORS.iter().position(|sep| separator_name(sep) == s))
+        .unwrap_or(0);
+    let capitalize = lines.next() == Some("capitalize");
+    Prefs {
+        kind,
+        length,
+        no_look_alikes,
+        words,
+        separator,
+        capitalize,
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +240,8 @@ mod tests {
             length: Input::new("25".into()),
             words: Input::new("6".into()),
             no_look_alikes: false,
+            separator: 0,
+            capitalize: false,
             field: Field::Name,
             error: None,
             overwrite: false,
@@ -199,5 +264,9 @@ mod tests {
         f.cycle_kind(true);
         assert_eq!(f.length(), Some(1));
         assert_eq!(f.length.text, "25");
+        // A passphrase swaps look-alikes for separator and capitals.
+        f.field = Field::Name;
+        f.next_field(true);
+        assert!(f.field == Field::Capitalize);
     }
 }

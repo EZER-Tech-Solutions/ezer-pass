@@ -46,6 +46,8 @@ pub enum Effect {
         spec: Spec,
         length: u32,
         in_place: bool,
+        /// A `login:` line to write under it (or update).
+        login: Option<String>,
     },
 }
 
@@ -563,7 +565,7 @@ impl App {
         }
     }
 
-    /// Keys for the generate form: Tab and ↑↓ between fields, ←→ (or
+    /// Keys for the generate form: Tab, ↑↓ or ^J ^K between fields, ←→ (or
     /// space) through the types and separators, digits or ←→ +- for the
     /// length, space (or ←→) to toggle look-alikes and capitals.
     fn generate_key(&mut self, key: KeyEvent) -> Effect {
@@ -574,6 +576,7 @@ impl App {
         let state = |f: &Form| {
             (
                 f.name.text.clone(),
+                f.login.text.clone(),
                 f.kind,
                 f.length.text.clone(),
                 f.words.text.clone(),
@@ -595,8 +598,13 @@ impl App {
             (_, KeyCode::Enter) => return self.submit_generate(),
             (_, KeyCode::Tab | KeyCode::Down) => form.next_field(false),
             (_, KeyCode::BackTab | KeyCode::Up) => form.next_field(true),
+            (_, KeyCode::Char('j')) if ctrl => form.next_field(false),
+            (_, KeyCode::Char('k')) if ctrl => form.next_field(true),
             (Field::Name, _) => {
                 form.name.handle(key);
+            }
+            (Field::Login, _) => {
+                form.login.handle(key);
             }
             (Field::Kind, KeyCode::Left | KeyCode::Char('h')) => form.cycle_kind(true),
             (Field::Kind, KeyCode::Right | KeyCode::Char('l' | ' ')) => form.cycle_kind(false),
@@ -649,6 +657,7 @@ impl App {
                 spec,
                 length,
                 in_place: false,
+                login: None,
             };
         }
         let path = store::resolve(&form.folder, name);
@@ -671,12 +680,14 @@ impl App {
         }
         form.save_prefs();
         let spec = form.spec();
+        let login = Some(form.login.text.trim().to_string()).filter(|l| !l.is_empty());
         self.mode = Mode::Browse;
         Effect::Generate {
             path: Some(path),
             spec,
             length,
             in_place,
+            login,
         }
     }
 

@@ -1,4 +1,4 @@
-//! The `g` form: name, type, length and look-alikes (or, for a
+//! The `g` form: name, login, type, length and look-alikes (or, for a
 //! passphrase, separator and capitals) for a new password.
 
 use super::app::Input;
@@ -10,6 +10,7 @@ pub const MAX_LENGTH: u32 = 4096;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Name,
+    Login,
     Kind,
     Length,
     LookAlikes,
@@ -21,6 +22,8 @@ pub struct Form {
     /// The folder the name is relative to.
     pub folder: String,
     pub name: Input,
+    /// Written under the password as `login:` when not empty.
+    pub login: Input,
     /// An index into `Kind::ALL`.
     pub kind: usize,
     /// The length in characters, for every type but a passphrase.
@@ -52,6 +55,7 @@ impl Form {
         Form {
             folder,
             name: Input::default(),
+            login: Input::default(),
             kind,
             length: Input::new(length.to_string()),
             words: Input::new(words.to_string()),
@@ -69,13 +73,20 @@ impl Form {
         if self.passphrase() {
             &[
                 Field::Name,
+                Field::Login,
                 Field::Kind,
                 Field::Length,
                 Field::Separator,
                 Field::Capitalize,
             ]
         } else {
-            &[Field::Name, Field::Kind, Field::Length, Field::LookAlikes]
+            &[
+                Field::Name,
+                Field::Login,
+                Field::Kind,
+                Field::Length,
+                Field::LookAlikes,
+            ]
         }
     }
 
@@ -236,6 +247,7 @@ mod tests {
         let mut f = Form {
             folder: String::new(),
             name: Input::default(),
+            login: Input::default(),
             kind: 0,
             length: Input::new("25".into()),
             words: Input::new("6".into()),
@@ -247,7 +259,10 @@ mod tests {
             overwrite: false,
         };
         f.next_field(false);
+        assert!(f.field == Field::Login);
+        f.next_field(false);
         assert!(f.field == Field::Kind);
+        f.next_field(true);
         f.next_field(true);
         assert!(f.field == Field::Name);
         f.next_field(true);

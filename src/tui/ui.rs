@@ -1669,6 +1669,15 @@ fn draw_generate(f: &mut Frame, form: &Form) {
                 row.push(form.name.text.clone().bold());
                 row
             }
+            Field::Login => {
+                let mut row = label("login", field);
+                if form.login.text.is_empty() && form.field != Field::Login {
+                    row.push("optional".dim());
+                } else {
+                    row.push(form.login.text.clone().bold());
+                }
+                row
+            }
             Field::Kind => {
                 let mut row = label("type", field);
                 for (i, k) in Kind::ALL.iter().enumerate() {
@@ -1708,7 +1717,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
                 row
             }
             Field::Capitalize => {
-                let mut row = label("capitals", field);
+                let mut row = label("caps", field);
                 row.push(checkbox(form.capitalize));
                 row.push(" Capitalize words, end with a digit".dim());
                 row
@@ -1741,23 +1750,25 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     let mut keys = match form.field {
         Field::Kind | Field::Separator => hint(&[
             ("←→", "choose"),
-            ("tab", "next"),
+            ("tab ^j^k", "move"),
             ("⏎", "generate"),
             ("esc", "cancel"),
         ]),
         Field::Length => hint(&[
             ("←→", "±1"),
-            ("tab", "next"),
+            ("tab ^j^k", "move"),
             ("⏎", "generate"),
             ("esc", "cancel"),
         ]),
         Field::LookAlikes | Field::Capitalize => hint(&[
             ("space", "toggle"),
-            ("tab", "next"),
+            ("tab ^j^k", "move"),
             ("⏎", "generate"),
             ("esc", "cancel"),
         ]),
-        Field::Name => hint(&[("tab", "next"), ("⏎", "generate"), ("esc", "cancel")]),
+        Field::Name | Field::Login => {
+            hint(&[("tab ^j^k", "move"), ("⏎", "generate"), ("esc", "cancel")])
+        }
     };
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
@@ -1767,7 +1778,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     let width = 82.min(f.area().width);
     // Sized for the type with the most fields, so it doesn't jump as the
     // type changes.
-    let most = 5 * 2 + 1;
+    let most = 6 * 2 + 1;
     let area = popup_fixed(f.area(), width, most + 4);
     f.render_widget(Clear, area);
     let inner = block.inner(area);
@@ -1779,6 +1790,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     };
     let col = match form.field {
         Field::Name => folder.chars().count() + form.name.cursor_col(),
+        Field::Login => form.login.cursor_col(),
         Field::Length => form.length_input().cursor_col(),
         _ => return,
     };

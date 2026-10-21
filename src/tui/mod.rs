@@ -123,11 +123,18 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
             spec,
             length,
             in_place,
+            login,
         } => match path {
             Some(path) => {
-                let result =
-                    commands::generate(&mut app.sess, &path, &spec, length as usize, in_place)
-                        .and_then(|password| clipboard::copy(&password));
+                let result = commands::generate(
+                    &mut app.sess,
+                    &path,
+                    &spec,
+                    length as usize,
+                    in_place,
+                    login.as_deref(),
+                )
+                .and_then(|password| clipboard::copy(&password));
                 let next = app.finish_generate(path, result);
                 perform(terminal, app, next)?;
             }

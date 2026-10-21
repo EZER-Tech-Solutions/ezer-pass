@@ -271,7 +271,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [-c] [-f] [-i] [entry] [length]",
+                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [--login=NAME] [-c] [-f] [-i] [entry] [length]",
                 0,
                 2,
             )?;
@@ -551,24 +551,65 @@ pub fn default_length() -> u32 {
         .unwrap_or(25)
 }
 
-/// Generate a password into `path` and commit it. `in_place` replaces only the first line of an existing
-/// entry, keeping the rest. Returns the password, for the caller to copy
-/// or show.
+/// The names browserpass reads a username from.
+const LOGIN_KEYS: [&str; 3] = ["login", "username", "user"];
+
+/// An entry holding `password`, then `login` if given. With `old`, only
+/// its first line is replaced, and its login line (if it has one) gets
+/// the new login; the rest is kept, untouched when there's no login.
+fn with_password(old: Option<&str>, password: &str, login: Option<&str>) -> Zeroizing<String> {
+    let rest = old
+        .and_then(|o| o.split_once('\n'))
+        .map_or("", |(_, rest)| rest);
+    let Some(login) = login else {
+        return Zeroizing::new(format!("{password}\n{rest}"));
+    };
+    let mut lines: Zeroizing<Vec<String>> =
+        Zeroizing::new(rest.lines().map(String::from).collect());
+    let key_of = |line: &str| {
+        line.split_once(':')
+            .map(|(key, _)| key.trim().to_ascii_lowercase())
+    };
+    match lines
+        .iter()
+        .position(|l| key_of(l).is_some_and(|k| LOGIN_KEYS.contains(&k.as_str())))
+    {
+        Some(i) => {
+            let key = lines[i].split_once(':').map_or("login", |(key, _)| key);
+            lines[i] = format!("{key}: {login}");
+        }
+        None => lines.insert(0, format!("login: {login}")),
+    }
+    let mut content = Zeroizing::new(format!("{password}\n"));
+    for line in lines.iter() {
+        content.push_str(line);
+        content.push('\n');
+    }
+    content
+}
+
+/// Generate a password into `path` and commit it, with a login line if
+/// `login` is given. `in_place` replaces only the first line of an
+/// existing entry (and its login), keeping the rest. Returns the
+/// password, for the caller to copy or show.
 pub fn generate(
     sess: &mut Session,
     path: &str,
     spec: &Spec,
     length: usize,
     in_place: bool,
+    login: Option<&str>,
 ) -> Result<Zeroizing<String>> {
+    if login.is_some_and(|l| l.contains(['\n', '\r'])) {
+        bail!("the login can't hold a line break");
+    }
     let password = spec.generate(length)?;
-    let content = if in_place {
-        let old = sess.read(path)?;
-        let rest = old.split_once('\n').map_or("", |(_, rest)| rest);
-        Zeroizing::new(format!("{}\n{rest}", *password))
+    let old = if in_place {
+        Some(sess.read(path)?)
     } else {
-        Zeroizing::new(format!("{}\n", *password))
+        None
     };
+    let content = with_password(old.as_ref().map(|o| o.as_str()), &password, login);
     let message = if in_place {
         format!("Replace generated password for {path}.")
     } else {
@@ -587,6 +628,7 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
         Kind::from_flag(f).is_none()
             && !f.starts_with("--exclude=")
             && !f.starts_with("--separator=")
+            && !f.starts_with("--login=")
             && !matches!(
                 **f,
                 "-c" | "--clip"
@@ -645,9 +687,13 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
         None if spec.kind == Kind::Passphrase => password::DEFAULT_WORDS as usize,
         None => default_length() as usize,
     };
+    let login = flags.iter().rev().find_map(|f| f.strip_prefix("--login="));
     let Some(entry) = entry else {
         if has(&["-i", "--in-place"]) {
             bail!("-i needs an entry");
+        }
+        if login.is_some() {
+            bail!("--login needs an entry");
         }
         let password = spec.generate(length)?;
         if has(&["-c", "--clip"]) {
@@ -680,7 +726,7 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
     {
         return Ok(());
     }
-    let password = generate(sess, &path, &spec, length, in_place)?;
+    let password = generate(sess, &path, &spec, length, in_place, login)?;
     if has(&["-c", "--clip"]) {
         clipboard::copy(&password)?;
         println!(
@@ -1540,6 +1586,7 @@ fn print_help() {
         "  --capitalize --separator=X",
         "capitalize words and add a digit, or join with X",
     );
+    entry("  --login=NAME", "add (or with -i, update) a login: line");
     entry(
         "  --no-ambiguous --exclude=CHARS",
         "leave out look-alikes (0O1lI|) or the characters given",
@@ -1622,7 +1669,28 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::tokenize;
+    use super::{tokenize, with_password};
+
+    #[test]
+    fn a_login_goes_under_the_password() {
+        assert_eq!(*with_password(None, "pw", None), "pw\n");
+        assert_eq!(*with_password(None, "pw", Some("me")), "pw\nlogin: me\n");
+        // In place: the old password goes, its login line is updated,
+        // keeping its name, and everything else stays.
+        let old = "old\nurl: x.com\nUsername: you\nnote";
+        assert_eq!(
+            *with_password(Some(old), "pw", Some("me")),
+            "pw\nurl: x.com\nUsername: me\nnote\n"
+        );
+        assert_eq!(
+            *with_password(Some("old\nurl: x.com"), "pw", Some("me")),
+            "pw\nlogin: me\nurl: x.com\n"
+        );
+        assert_eq!(
+            *with_password(Some(old), "pw", None),
+            "pw\nurl: x.com\nUsername: you\nnote"
+        );
+    }
 
     #[test]
     fn plain_words() {

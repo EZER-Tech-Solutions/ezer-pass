@@ -1659,23 +1659,48 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     };
     let chosen = Kind::ALL[form.kind];
     let folder = format!("{}/", store::display(&form.folder).trim_end_matches('/'));
+    let width = 82.min(f.area().width);
+    // The name and login fields span the popup, less its border and
+    // padding, the label column, the field's leading space and the icon.
+    let wide = (width as usize).saturating_sub(2 + 3 + 9 + 1 + 3);
+    let icon = |glyph: char, field: Field| -> Span<'static> {
+        let glyph = format!("  {glyph}");
+        if form.field == field {
+            glyph.fg(ACCENT)
+        } else {
+            glyph.dim()
+        }
+    };
+    // The focused text field's row and column, for the cursor.
+    let mut cursor = None;
 
     let mut rows: Vec<(Field, Vec<Span<'static>>)> = Vec::new();
     for &field in form.fields() {
         let row = match field {
             Field::Name => {
                 let mut row = label("name", field);
-                row.push(folder.clone().dim());
-                row.push(form.name.text.clone().bold());
+                let (spans, col) =
+                    text_field(&folder, &form.name.text, form.name.cursor_col(), wide);
+                row.extend(spans);
+                row.push(icon('\u{f15b}', field));
+                if form.field == field {
+                    cursor = Some((rows.len(), col));
+                }
                 row
             }
             Field::Login => {
                 let mut row = label("login", field);
-                if form.login.text.is_empty() && form.field != Field::Login {
-                    row.push("optional".dim());
+                if form.login.text.is_empty() && form.field != field {
+                    row.push(format!(" {:<wide$}", "optional").bg(FIELD).dim());
                 } else {
-                    row.push(form.login.text.clone().bold());
+                    let (spans, col) =
+                        text_field("", &form.login.text, form.login.cursor_col(), wide);
+                    row.extend(spans);
+                    if form.field == field {
+                        cursor = Some((rows.len(), col));
+                    }
                 }
+                row.push(icon('\u{f007}', field));
                 row
             }
             Field::Kind => {
@@ -1687,7 +1712,13 @@ fn draw_generate(f: &mut Frame, form: &Form) {
             }
             Field::Length => {
                 let mut row = label("length", field);
-                row.push(form.length_input().text.clone().bold());
+                let input = form.length_input();
+                // Room for MAX_LENGTH's digits and the cursor after them.
+                let (spans, col) = text_field("", &input.text, input.cursor_col(), 5);
+                row.extend(spans);
+                if form.field == field {
+                    cursor = Some((rows.len(), col));
+                }
                 row.push(format!("  {}", chosen.unit()).dim());
                 if let Some(n) = form.length() {
                     let bits = form.spec().bits(n as usize).floor();
@@ -1775,30 +1806,64 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     let block = popup(Line::from(" generate ").bold(), ACCENT)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
-    let width = 82.min(f.area().width);
-    // Sized for the type with the most fields, so it doesn't jump as the
-    // type changes.
-    let most = 6 * 2 + 1;
-    let area = popup_fixed(f.area(), width, most + 4);
+    let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
     let inner = block.inner(area);
     f.render_widget(Paragraph::new(lines).block(block), area);
 
     // The cursor sits in whichever text field is focused.
-    let Some(row) = rows.iter().position(|(field, _)| *field == form.field) else {
-        return;
-    };
-    let col = match form.field {
-        Field::Name => folder.chars().count() + form.name.cursor_col(),
-        Field::Login => form.login.cursor_col(),
-        Field::Length => form.length_input().cursor_col(),
-        _ => return,
-    };
-    let x = inner.x + 1 + 8 + col as u16;
-    f.set_cursor_position((
-        x.min(inner.right().saturating_sub(1)),
-        inner.y + row as u16 * 2,
-    ));
+    if let Some((row, col)) = cursor {
+        let x = inner.x + 9 + col as u16;
+        f.set_cursor_position((
+            x.min(inner.right().saturating_sub(1)),
+            inner.y + row as u16 * 2,
+        ));
+    }
+}
+
+/// A shaded text field `width` wide (plus a leading space): `prefix`
+/// dim, then `text`. Text too long for it shows only its end, after `…`.
+/// Also returns the column, from the leading space, of a cursor `cursor`
+/// characters into `text`, kept inside the field.
+fn text_field(
+    prefix: &str,
+    text: &str,
+    cursor: usize,
+    width: usize,
+) -> (Vec<Span<'static>>, usize) {
+    let prefix_len = prefix.chars().count();
+    let all: Vec<(char, bool)> = prefix
+        .chars()
+        .map(|c| (c, true))
+        .chain(text.chars().map(|c| (c, false)))
+        .collect();
+    // Keep a column free for the cursor after the last character.
+    let skip = all.len().saturating_sub(width.saturating_sub(1));
+    let mut spans = vec![Span::raw(" ")];
+    let mut shown = 0;
+    if skip > 0 {
+        spans.push("…".dim());
+        shown += 1;
+    }
+    let start = if skip > 0 { skip + 1 } else { 0 };
+    let visible = &all[start.min(all.len())..];
+    for (is_prefix, group) in [true, false].map(|p| {
+        (
+            p,
+            visible
+                .iter()
+                .filter(|(_, in_prefix)| *in_prefix == p)
+                .map(|(c, _)| c)
+                .collect::<String>(),
+        )
+    }) {
+        shown += group.chars().count();
+        spans.push(if is_prefix { group.dim() } else { group.bold() });
+    }
+    spans.push(" ".repeat(width.saturating_sub(shown)).into());
+    let spans = spans.into_iter().map(|s| s.bg(FIELD)).collect();
+    let col = 1 + (prefix_len + cursor).saturating_sub(start) + usize::from(skip > 0);
+    (spans, col.min(width))
 }
 
 /// The `C` popup: every context with its store, the current one marked;
@@ -1986,6 +2051,17 @@ fn ago(t: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_fields_show_the_end_of_long_text() {
+        let text = |spans: &[Span]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let (spans, col) = text_field("a/", "bc", 2, 8);
+        assert_eq!(text(&spans), " a/bc    ");
+        assert_eq!(col, 5);
+        let (spans, col) = text_field("a/", "bcdefghij", 9, 8);
+        assert_eq!(text(&spans), " …efghij ");
+        assert_eq!(col, 8);
+    }
 
     fn rows(paths: &[(&str, bool)]) -> Vec<Row> {
         paths

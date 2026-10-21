@@ -1,4 +1,4 @@
-use super::app::{App, Confirm, Mode, Picker, Row, Secret, Unlock, basename, join};
+use super::app::{App, Confirm, Insert, Mode, Picker, Row, Secret, Unlock, basename, join};
 use super::generate::{Field, Form};
 use super::history;
 use super::palette;
@@ -26,6 +26,8 @@ const MARK: Color = Color::LightMagenta;
 /// File entries (base64-stored files), told apart via the file index.
 const FILE: Color = Color::Magenta;
 const DANGER: Color = Color::Red;
+/// The passphrase and insert popups, so they stand apart from the rest.
+const UNLOCK: Color = Color::LightRed;
 const MASK: &str = "••••••••••••";
 /// Width of the highlight bar the list draws before every row.
 const BAR: &str = "▌";
@@ -77,6 +79,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             | Mode::Sync(_)
             | Mode::Generate(_)
             | Mode::Unlock(_)
+            | Mode::Insert(_)
             | Mode::Contexts(_)
     ) {
         // Push everything behind a popup into the background.
@@ -94,6 +97,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         Mode::Sync(sync) => draw_sync(f, app, sync),
         Mode::Unlock(u) => draw_unlock(f, u),
+        Mode::Insert(ins) => draw_insert(f, ins),
         Mode::Contexts(picker) => draw_contexts(f, app, picker),
         _ => {}
     }
@@ -103,23 +107,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_unlock(f: &mut Frame, u: &Unlock) {
     let dots = "•".repeat(u.input.text.chars().count());
     let status = match (&u.error, u.working) {
-        (_, true) => Line::from("unlocking…".fg(MARK)),
+        (_, true) => Line::from("unlocking…".fg(UNLOCK)),
         (Some(e), _) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
         (None, _) => "once per session; kept in memory only".dim().into(),
     };
     let lines = vec![
         Line::from(vec![
-            BAR.fg(DANGER),
-            "passphrase ".fg(MARK).bold(),
+            BAR.fg(UNLOCK),
+            "passphrase ".fg(UNLOCK).bold(),
             dots.clone().bold(),
         ]),
         "".into(),
         status,
     ];
-    let mut keys = hint_in(&[("⏎", "unlock"), ("esc", "cancel")], MARK);
+    let mut keys = hint_in(&[("⏎", "unlock"), ("esc", "cancel")], UNLOCK);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    let block = popup(Line::from(" unlock ").bold(), MARK)
+    let block = popup(Line::from(" unlock ").bold(), UNLOCK)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
     let area = popup_fixed(f.area(), 56.min(f.area().width), lines.len() as u16 + 4);
@@ -130,6 +134,38 @@ fn draw_unlock(f: &mut Frame, u: &Unlock) {
         let x = inner.x + 1 + 11 + dots.chars().count() as u16;
         f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
     }
+}
+
+/// The insert popup: the new entry's value, masked like the passphrase.
+fn draw_insert(f: &mut Frame, ins: &Insert) {
+    let dots = "•".repeat(ins.input.text.chars().count());
+    let shown = store::display(&ins.path);
+    let status = if ins.exists {
+        Line::from(format!("{shown} exists — ⏎ replaces it").fg(MARK))
+    } else {
+        "encrypted into the store; never shown".dim().into()
+    };
+    let lines = vec![
+        Line::from(vec![
+            BAR.fg(UNLOCK),
+            "value ".fg(UNLOCK).bold(),
+            dots.bold(),
+        ]),
+        "".into(),
+        status,
+    ];
+    let mut keys = hint_in(&[("⏎", "save"), ("esc", "cancel")], UNLOCK);
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let block = popup(Line::from(format!(" insert {shown} ")).bold(), UNLOCK)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(1, 2, 1, 1));
+    let area = popup_fixed(f.area(), 56.min(f.area().width), lines.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    let inner = block.inner(area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
+    let x = inner.x + 1 + 6 + ins.input.cursor_col() as u16;
+    f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
 }
 
 fn pane(title: &str) -> Block<'_> {
@@ -739,10 +775,13 @@ fn draw_view(f: &mut Frame, app: &App) {
     };
     let mut keys = match &view.secret {
         Secret::Text(_) if view.revealed_at.is_some() => {
-            hint(&[("space", "hide"), ("c", "copy"), ("esc", "close")])
+            hint_in(&[("space", "hide"), ("c", "copy"), ("esc", "close")], MARK)
         }
-        Secret::Text(_) => hint(&[("space", "reveal"), ("c", "copy"), ("esc", "close")]),
-        Secret::File { .. } => hint(&[("E", "export"), ("esc", "close")]),
+        Secret::Text(_) => hint_in(
+            &[("space", "reveal"), ("c", "copy"), ("esc", "close")],
+            MARK,
+        ),
+        Secret::File { .. } => hint_in(&[("E", "export"), ("esc", "close")], MARK),
     };
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
@@ -752,7 +791,7 @@ fn draw_view(f: &mut Frame, app: &App) {
         entry_style(app, &view.path).add_modifier(ratatui::style::Modifier::BOLD),
     ));
     title.push(" ".into());
-    let mut block = popup(Line::from(title), ACCENT)
+    let mut block = popup(Line::from(title), MARK)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(2, 2, 1, 1));
     if let Some(t) = view.revealed_at {

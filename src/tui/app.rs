@@ -15,6 +15,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 /// How many recently used entries the bottom pane keeps (and `1`-`5` copy).
 pub const RECENT_MAX: usize = 5;
@@ -67,6 +68,15 @@ pub struct Unlock {
     /// The passphrase is being tried (it takes about a second).
     pub working: bool,
     then: Box<Effect>,
+}
+
+/// Typing a new entry's value (`insert <entry>`), masked like the
+/// passphrase.
+pub struct Insert {
+    pub path: String,
+    pub input: Input,
+    /// The entry is there already: saving replaces it.
+    pub exists: bool,
 }
 
 /// Commands to run one after another, stopping at the first failure.
@@ -193,6 +203,8 @@ pub enum Mode {
     History(Box<History>),
     /// Asking for the identity's passphrase.
     Unlock(Unlock),
+    /// Asking for a new entry's value.
+    Insert(Insert),
     /// Picking a context (`C`).
     Contexts(Picker),
 }
@@ -779,6 +791,7 @@ impl App {
             Mode::Sync(_) => self.sync_key(key),
             Mode::History(_) => self.history_key(key),
             Mode::Unlock(_) => self.unlock_key(key),
+            Mode::Insert(_) => self.insert_key(key),
             Mode::Contexts(_) => self.contexts_key(key),
         }
     }
@@ -877,6 +890,55 @@ impl App {
                 self.error(format!("{e:#}"));
                 Effect::None
             }
+        }
+    }
+
+    fn insert_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Insert(ins) = &mut self.mode else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Browse,
+            KeyCode::Char('c') if ctrl => self.mode = Mode::Browse,
+            KeyCode::Enter if !ins.input.text.is_empty() => self.save_insert(),
+            _ => {
+                ins.input.handle(key);
+            }
+        }
+        Effect::None
+    }
+
+    /// Encrypt the typed value into the entry and commit it.
+    fn save_insert(&mut self) {
+        let Mode::Insert(mut ins) = std::mem::replace(&mut self.mode, Mode::Browse) else {
+            return;
+        };
+        let typed = Zeroizing::new(std::mem::take(&mut ins.input).text);
+        let content = Zeroizing::new(format!("{}\n", *typed));
+        let path = ins.path;
+        let result = self.sess.save(
+            &path,
+            content.as_bytes(),
+            &format!("Add given password for {path} to store."),
+        );
+        let size = fileio::decode_payload(&content)
+            .ok()
+            .map(|f| f.data.len() as u64);
+        self.sess.files.learn(&path, size);
+        self.sess.files.save(self.sess.store.root());
+        if let Some(f) = &mut self.filter {
+            f.index = self.sess.store.walk();
+        }
+        self.refresh_git();
+        if self.sess.store.is_entry(&path) {
+            self.go_to(&path);
+        } else {
+            self.rebuild(None);
+        }
+        match result {
+            Ok(()) => self.info(format!("saved {}", store::display(&path))),
+            Err(e) => self.error(format!("{e:#}")),
         }
     }
 
@@ -1954,6 +2016,22 @@ impl App {
                 } else {
                     Effect::Decrypt(path)
                 };
+            }
+            // Ask for the value in a popup rather than on the terminal.
+            "insert"
+                if positional.len() == 1
+                    && flags.iter().all(|f| matches!(*f, "-f" | "--force")) =>
+            {
+                let path = self.sess.resolve(positional[0]);
+                if path.is_empty() || store.is_dir(&path) {
+                    self.error(format!("{} is a folder", store::display(&path)));
+                } else {
+                    self.mode = Mode::Insert(Insert {
+                        exists: store.is_entry(&path),
+                        path,
+                        input: Input::default(),
+                    });
+                }
             }
             // Switch here, offering a push first, rather than in `commands`.
             "context" if positional.first() == Some(&"use") && positional.len() == 2 => {

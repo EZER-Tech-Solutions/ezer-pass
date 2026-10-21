@@ -9,6 +9,7 @@ mod history;
 mod palette;
 mod preview;
 mod sync;
+mod theme;
 mod ui;
 
 use crate::commands::{self, Session};
@@ -26,6 +27,7 @@ use std::time::Duration;
 
 pub fn run(sess: Session) -> Result<()> {
     let mut app = App::new(sess);
+    theme::load();
     let mut terminal = ratatui::try_init()?;
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();

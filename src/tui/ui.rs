@@ -4,6 +4,7 @@ use super::history;
 use super::palette;
 use super::preview::{Body, Preview};
 use super::sync::{Op, Sync};
+use super::theme::{THEMES, theme};
 use crate::password::{Kind, LOOK_ALIKES, SEPARATORS, separator_name};
 use crate::{index, store};
 use ratatui::Frame;
@@ -18,25 +19,9 @@ use ratatui::widgets::{
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-// Picked by eye on a dark theme. 0-15 follow the terminal's theme;
-// indexed colors above that are fixed.
-const ACCENT: Color = Color::Indexed(214);
-const DIR: Color = Color::Cyan;
-const MARK: Color = Color::LightMagenta;
-/// File entries (base64-stored files), told apart via the file index.
-const FILE: Color = Color::Magenta;
-const DANGER: Color = Color::Red;
-/// The passphrase and insert popups, so they stand apart from the rest.
-const UNLOCK: Color = Color::LightRed;
 const MASK: &str = "••••••••••••";
 /// Width of the highlight bar the list draws before every row.
 const BAR: &str = "▌";
-/// The dark grey behind the title chips and the highlighted row.
-const SHADE: Color = Color::Indexed(236);
-/// Behind the popup input fields; darker than `SHADE` so it stays quiet.
-const FIELD: Color = Color::Indexed(234);
-/// Pane borders.
-const BORDER: Color = Color::Indexed(242);
 /// Width of the label column in the info pane.
 const LABEL: usize = 8;
 /// The narrowest terminal that gets the preview pane beside the tree.
@@ -83,6 +68,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             | Mode::Unlock(_)
             | Mode::Insert(_)
             | Mode::Contexts(_)
+            | Mode::Themes { .. }
     ) {
         // Push everything behind a popup into the background.
         let area = f.area();
@@ -101,6 +87,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Unlock(u) => draw_unlock(f, u),
         Mode::Insert(ins) => draw_insert(f, ins),
         Mode::Contexts(picker) => draw_contexts(f, app, picker),
+        Mode::Themes { list, .. } => draw_themes(f, list.selected()),
         _ => {}
     }
 }
@@ -109,17 +96,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_unlock(f: &mut Frame, u: &Unlock) {
     let len = u.input.text.chars().count();
     let status = match (&u.error, u.working) {
-        (_, true) => Line::from("unlocking…".fg(UNLOCK)),
-        (Some(e), _) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
+        (_, true) => Line::from("unlocking…".fg(theme().unlock)),
+        (Some(e), _) => Line::from(vec![
+            "✗ ".fg(theme().danger).bold(),
+            e.clone().fg(theme().danger),
+        ]),
         (None, _) => "once per session; kept in memory only".dim().into(),
     };
     let width = 56.min(f.area().width);
     let (prompt, col) = input_line("passphrase: ", len, len, '\u{f023}', width);
     let lines = vec![prompt, "".into(), status];
-    let mut keys = hint_in(&[("⏎", "unlock"), ("esc", "cancel")], UNLOCK);
+    let mut keys = hint_in(&[("⏎", "unlock"), ("esc", "cancel")], theme().unlock);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    let block = popup(Line::from(" unlock ").bold(), UNLOCK)
+    let block = popup(Line::from(" unlock ").bold(), theme().unlock)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
@@ -135,7 +125,7 @@ fn draw_unlock(f: &mut Frame, u: &Unlock) {
 fn draw_insert(f: &mut Frame, ins: &Insert) {
     let shown = store::display(&ins.path);
     let status = if ins.exists {
-        Line::from(format!("{shown} exists — ⏎ replaces it").fg(MARK))
+        Line::from(format!("{shown} exists — ⏎ replaces it").fg(theme().mark))
     } else {
         "encrypted into the store; never shown".dim().into()
     };
@@ -143,12 +133,15 @@ fn draw_insert(f: &mut Frame, ins: &Insert) {
     let len = ins.input.text.chars().count();
     let (prompt, col) = input_line("value: ", len, ins.input.cursor_col(), '\u{f084}', width);
     let lines = vec![prompt, "".into(), status];
-    let mut keys = hint_in(&[("⏎", "save"), ("esc", "cancel")], UNLOCK);
+    let mut keys = hint_in(&[("⏎", "save"), ("esc", "cancel")], theme().unlock);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    let block = popup(Line::from(format!(" insert {shown} ")).bold(), UNLOCK)
-        .title_bottom(keys.right_aligned())
-        .padding(Padding::new(1, 2, 1, 1));
+    let block = popup(
+        Line::from(format!(" insert {shown} ")).bold(),
+        theme().unlock,
+    )
+    .title_bottom(keys.right_aligned())
+    .padding(Padding::new(1, 2, 1, 1));
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
     let inner = block.inner(area);
@@ -160,7 +153,7 @@ fn pane(title: &str) -> Block<'_> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(format!(" {title} ")).bold())
-        .border_style(Style::new().fg(BORDER))
+        .border_style(Style::new().fg(theme().border))
 }
 
 fn popup(title: Line<'static>, color: Color) -> Block<'static> {
@@ -174,7 +167,7 @@ fn popup(title: Line<'static>, color: Color) -> Block<'static> {
 /// How an entry's name is drawn: file entries in their own color.
 fn entry_style(app: &App, path: &str) -> Style {
     if app.sess.files.is_file(path) {
-        Style::new().fg(FILE)
+        Style::new().fg(theme().file)
     } else {
         Style::new()
     }
@@ -224,13 +217,13 @@ fn guides(rows: &[Row]) -> Vec<String> {
 }
 
 fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
-    let mut title = vec![" ezer-pass ".fg(Color::LightMagenta).bg(SHADE).bold()];
+    let mut title = vec![" ezer-pass ".fg(theme().mark).bg(theme().shade).bold()];
     if app.show_context {
         title.push(" ".into());
         title.push(
             format!(" {} ", app.sess.context.name)
-                .fg(ACCENT)
-                .bg(SHADE)
+                .fg(theme().accent)
+                .bg(theme().shade)
                 .bold(),
         );
     }
@@ -241,7 +234,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
         .border_type(BorderType::Rounded)
         .title(title)
         .title_top(Line::from(format!(" {root} ").dim()).right_aligned())
-        .border_style(Style::new().fg(BORDER));
+        .border_style(Style::new().fg(theme().border));
     if app.filtering() {
         let matches = app.rows.iter().filter(|r| !r.context_only).count();
         block = block.title_bottom(
@@ -249,7 +242,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                 " {matches} match{} ",
                 if matches == 1 { "" } else { "es" }
             ))
-            .fg(ACCENT),
+            .fg(theme().accent),
         );
     }
     if let Some(i) = app.list.selected() {
@@ -303,24 +296,24 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
             // highlighted row in the accent (the pill on its name still
             // shows where the cursor is when both apply).
             let bar = if app.marks.contains(&row.path) {
-                BAR.fg(MARK)
+                BAR.fg(theme().mark)
             } else if selected == Some(i) {
-                BAR.fg(ACCENT)
+                BAR.fg(theme().accent)
             } else {
                 " ".into()
             };
             let flag = if cut.contains(&row.path.as_str()) {
-                "✂ ".fg(MARK)
+                "✂ ".fg(theme().mark)
             } else if copied.contains(&row.path.as_str()) {
-                "+ ".fg(MARK)
+                "+ ".fg(theme().mark)
             } else {
                 "  ".into()
             };
             let is_file = !row.is_dir && app.sess.files.is_file(&row.path);
             // Every icon is two columns wide; the rename cursor relies on it.
             let icon = match (row.is_dir, app.is_expanded(&row.path)) {
-                (true, open) => folder_icon(open).fg(DIR),
-                (false, _) if is_file => "▪ ".fg(FILE),
+                (true, open) => folder_icon(open).fg(theme().dir),
+                (false, _) if is_file => "▪ ".fg(theme().file),
                 (false, _) => "• ".dim(),
             };
             let mut spans = vec![bar, flag, guide.dim(), icon];
@@ -330,11 +323,11 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                 }
                 _ => {
                     let mut name = if row.path.is_empty() {
-                        row.name.clone().fg(ACCENT).bold()
+                        row.name.clone().fg(theme().accent).bold()
                     } else if row.is_dir {
-                        format!("{}/", row.name).fg(DIR).bold()
+                        format!("{}/", row.name).fg(theme().dir).bold()
                     } else if is_file {
-                        row.name.clone().fg(FILE)
+                        row.name.clone().fg(theme().file)
                     } else {
                         row.name.clone().into()
                     };
@@ -352,7 +345,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::new().bg(SHADE))
+        .highlight_style(Style::new().bg(theme().shade))
         .scroll_padding(2);
     f.render_stateful_widget(list, area, &mut app.list);
     if let Some(msg) = empty {
@@ -377,7 +370,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &mut App) {
                 .end_symbol(None)
                 .track_symbol(Some("│"))
                 .track_style(Style::new().dim())
-                .thumb_style(Style::new().fg(ACCENT)),
+                .thumb_style(Style::new().fg(theme().accent)),
             area.inner(Margin::new(0, 1)),
             &mut state,
         );
@@ -411,7 +404,7 @@ fn draw_recent(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            let mut spans = vec![format!(" {} ", i + 1).fg(ACCENT).bold()];
+            let mut spans = vec![format!(" {} ", i + 1).fg(theme().accent).bold()];
             spans.extend(path_spans(path, entry_style(app, path)));
             let mut line = Line::from(spans);
             if let Some((p, secs)) = clip
@@ -431,7 +424,7 @@ fn draw_recent(f: &mut Frame, area: Rect, app: &App) {
                     .saturating_sub(line.width() + tail.chars().count())
                     .max(2);
                 line.push_span(" ".repeat(gap));
-                line.push_span(tail.fg(MARK));
+                line.push_span(tail.fg(theme().mark));
             }
             line
         })
@@ -440,7 +433,7 @@ fn draw_recent(f: &mut Frame, area: Rect, app: &App) {
         lines.push(" entries you copy or view land here".dim().into());
         lines.push(Line::from(vec![
             "  ".into(),
-            "[1-5]".fg(ACCENT).bold(),
+            "[1-5]".fg(theme().accent).bold(),
             " use them again".dim(),
         ]));
     }
@@ -464,12 +457,12 @@ fn selection(app: &App) -> (Line<'static>, Line<'static>) {
             let root = row.path.is_empty();
             if root {
                 push(Line::from(vec![
-                    row.name.clone().fg(ACCENT).bold(),
+                    row.name.clone().fg(theme().accent).bold(),
                     format!("  {}", crate::context::tilde(app.sess.store.root())).dim(),
                 ]));
             } else {
-                let mut name = path_spans(&row.path, Style::new().fg(DIR).bold());
-                name.push("/".fg(DIR).bold());
+                let mut name = path_spans(&row.path, Style::new().fg(theme().dir).bold());
+                name.push("/".fg(theme().dir).bold());
                 push(Line::from(name));
             }
             let detail = match app.sess.store.list(&row.path) {
@@ -501,7 +494,7 @@ fn selection(app: &App) -> (Line<'static>, Line<'static>) {
         Some(row) => {
             let size = app.sess.files.size(&row.path);
             let style = if size.is_some() {
-                Style::new().fg(FILE).bold()
+                Style::new().fg(theme().file).bold()
             } else {
                 Style::new().bold()
             };
@@ -518,7 +511,7 @@ fn selection(app: &App) -> (Line<'static>, Line<'static>) {
             }
             if size.is_some() {
                 detail.push("   ".into());
-                detail.push("[⏎]".fg(ACCENT).bold());
+                detail.push("[⏎]".fg(theme().accent).bold());
                 detail.push(" export".dim());
             }
             push(Line::from(detail));
@@ -548,14 +541,20 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
             Some(b) => {
                 let names: Vec<&str> = b.paths.iter().map(|p| basename(p)).collect();
                 let mut spans = vec![
-                    if b.cut { "✂ cut " } else { "+ copied " }.fg(MARK).bold(),
+                    if b.cut { "✂ cut " } else { "+ copied " }
+                        .fg(theme().mark)
+                        .bold(),
                     names.join(", ").into(),
                 ];
                 if b.elsewhere(&app.sess.context) {
                     spans.push(" from ".dim());
-                    spans.push(b.context.name.clone().fg(ACCENT).bold());
+                    spans.push(b.context.name.clone().fg(theme().accent).bold());
                 }
-                spans.extend(["   ".into(), "[p]".fg(ACCENT).bold(), " paste".dim()]);
+                spans.extend([
+                    "   ".into(),
+                    "[p]".fg(theme().accent).bold(),
+                    " paste".dim(),
+                ]);
                 spans
             }
             None => vec!["empty".dim()],
@@ -568,13 +567,15 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
             vec!["none".dim()]
         } else {
             vec![
-                format!("{BAR}{} marked", app.marks.len()).fg(MARK).bold(),
+                format!("{BAR}{} marked", app.marks.len())
+                    .fg(theme().mark)
+                    .bold(),
                 "   ".into(),
-                "[x]".fg(ACCENT).bold(),
+                "[x]".fg(theme().accent).bold(),
                 " cut ".dim(),
-                "[y]".fg(ACCENT).bold(),
+                "[y]".fg(theme().accent).bold(),
                 " copy ".dim(),
-                "[d]".fg(ACCENT).bold(),
+                "[d]".fg(theme().accent).bold(),
                 " delete".dim(),
             ]
         },
@@ -585,9 +586,9 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         match &app.upstream {
             Some(up) if app.ahead > 0 => vec![
                 up.clone().into(),
-                format!("  ↑{} to push", app.ahead).fg(MARK),
+                format!("  ↑{} to push", app.ahead).fg(theme().mark),
             ],
-            Some(up) => vec![up.clone().into(), "  ✓ in sync".fg(ACCENT)],
+            Some(up) => vec![up.clone().into(), "  ✓ in sync".fg(theme().accent)],
             None => vec!["no upstream".dim()],
         },
     ));
@@ -596,7 +597,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         lines.push(labeled(
             "keys",
             if app.sess.keys.is_some() {
-                vec!["unlocked".fg(ACCENT)]
+                vec!["unlocked".fg(theme().accent)]
             } else {
                 vec!["locked".dim()]
             },
@@ -604,7 +605,7 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
         lines.push(labeled(
             "store",
             vec![
-                app.sess.context.name.clone().fg(ACCENT).bold(),
+                app.sess.context.name.clone().fg(theme().accent).bold(),
                 format!("  {}", crate::context::tilde(app.sess.store.root())).dim(),
             ],
         ));
@@ -622,7 +623,7 @@ fn secret_lines(text: &str, revealed: bool) -> Vec<Line<'_>> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
     let mut out = vec![if revealed {
-        first.fg(MARK).bold().into()
+        first.fg(theme().mark).bold().into()
     } else {
         MASK.dim().into()
     }];
@@ -672,7 +673,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, preview: &Preview) {
                     middle_cut(&r.key, width.saturating_sub(6)).into(),
                 ];
                 if r.you {
-                    spans.push(" you".fg(ACCENT));
+                    spans.push(" you".fg(theme().accent));
                 }
                 lines.push(Line::from(spans));
             }
@@ -680,8 +681,8 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, preview: &Preview) {
         Body::Folder(Err(e)) => {
             lines.push("".into());
             lines.push(Line::from(vec![
-                "✗ ".fg(DANGER).bold(),
-                e.clone().fg(DANGER),
+                "✗ ".fg(theme().danger).bold(),
+                e.clone().fg(theme().danger),
             ]));
         }
         Body::Entry(fields) => {
@@ -693,14 +694,14 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, preview: &Preview) {
                 }
                 Some(Err(e)) => {
                     lines.push(Line::from(vec![
-                        "✗ ".fg(DANGER).bold(),
-                        e.clone().fg(DANGER),
+                        "✗ ".fg(theme().danger).bold(),
+                        e.clone().fg(theme().danger),
                     ]));
                 }
                 None => lines.push(Line::from(vec![
                     MASK.dim(),
                     "   ".into(),
-                    "[⏎]".fg(ACCENT).bold(),
+                    "[⏎]".fg(theme().accent).bold(),
                     " unlock".dim(),
                 ])),
             }
@@ -728,7 +729,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App, preview: &Preview) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(title.bold())
-        .border_style(Style::new().fg(BORDER))
+        .border_style(Style::new().fg(theme().border))
         .padding(Padding::horizontal(1));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -755,21 +756,25 @@ fn draw_view(f: &mut Frame, app: &App) {
     let lines = match &view.secret {
         Secret::Text(text) => secret_lines(text, view.revealed_at.is_some()),
         Secret::File { filename, size } => vec![
-            Line::from(vec!["▪ ".fg(FILE), filename.as_str().fg(FILE).bold()]),
+            Line::from(vec![
+                "▪ ".fg(theme().file),
+                filename.as_str().fg(theme().file).bold(),
+            ]),
             format!("file entry · {}", index::human_size(*size as u64))
                 .dim()
                 .into(),
         ],
     };
     let mut keys = match &view.secret {
-        Secret::Text(_) if view.revealed_at.is_some() => {
-            hint_in(&[("space", "hide"), ("c", "copy"), ("esc", "close")], MARK)
-        }
+        Secret::Text(_) if view.revealed_at.is_some() => hint_in(
+            &[("space", "hide"), ("c", "copy"), ("esc", "close")],
+            theme().mark,
+        ),
         Secret::Text(_) => hint_in(
             &[("space", "reveal"), ("c", "copy"), ("esc", "close")],
-            MARK,
+            theme().mark,
         ),
-        Secret::File { .. } => hint_in(&[("E", "export"), ("esc", "close")], MARK),
+        Secret::File { .. } => hint_in(&[("E", "export"), ("esc", "close")], theme().mark),
     };
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
@@ -779,16 +784,16 @@ fn draw_view(f: &mut Frame, app: &App) {
         entry_style(app, &view.path).add_modifier(ratatui::style::Modifier::BOLD),
     ));
     title.push(" ".into());
-    let mut block = popup(Line::from(title), MARK)
+    let mut block = popup(Line::from(title), theme().mark)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(2, 2, 1, 1));
     if let Some(t) = view.revealed_at {
         let left = app.clip_time.saturating_sub(t.elapsed()).as_secs() + 1;
-        block = block.title_bottom(format!(" hides in {left}s ").fg(MARK));
+        block = block.title_bottom(format!(" hides in {left}s ").fg(theme().mark));
     } else if let Some((p, secs)) = app.clip_remaining()
         && p == view.path
     {
-        block = block.title_bottom(format!(" ⧉ copied · {secs}s ").fg(MARK));
+        block = block.title_bottom(format!(" ⧉ copied · {secs}s ").fg(theme().mark));
     }
     let width = (f.area().width * 6 / 10).max(44);
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
@@ -835,21 +840,21 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let input = match &app.mode {
         Mode::Command(input) => {
             let prefix = format!("{}/ ", store::display(&app.sess.cwd).trim_end_matches('/'));
-            Some((vec![prefix.dim(), ":".fg(ACCENT).bold()], input))
+            Some((vec![prefix.dim(), ":".fg(theme().accent).bold()], input))
         }
         Mode::Filter => app
             .filter
             .as_ref()
-            .map(|flt| (vec!["/".fg(ACCENT).bold()], &flt.input)),
-        Mode::Rename { input, .. } => Some((vec!["rename ".fg(ACCENT).bold()], input)),
+            .map(|flt| (vec!["/".fg(theme().accent).bold()], &flt.input)),
+        Mode::Rename { input, .. } => Some((vec!["rename ".fg(theme().accent).bold()], input)),
         _ => None,
     };
     if let Some((mut spans, input)) = input {
         if let Mode::Rename { .. } = app.mode {
             // The name is edited in the tree; the footer only says how.
-            spans.push("⏎".fg(ACCENT).bold());
+            spans.push("⏎".fg(theme().accent).bold());
             spans.push(" save  ".dim());
-            spans.push("esc".fg(ACCENT).bold());
+            spans.push("esc".fg(theme().accent).bold());
             spans.push(" cancel  ".dim());
             spans.push("../ and /abs move it".dim());
             f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -864,14 +869,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     }
     let line = match &app.status {
         Some(s) if s.error => {
-            let line = Line::from(vec!["✗ ".fg(DANGER).bold(), s.text.as_str().fg(DANGER)]);
+            let line = Line::from(vec![
+                "✗ ".fg(theme().danger).bold(),
+                s.text.as_str().fg(theme().danger),
+            ]);
             f.render_widget(Paragraph::new(line).wrap(Wrap { trim: true }), area);
             return;
         }
-        Some(s) => Line::from(s.text.as_str().fg(ACCENT)),
+        Some(s) => Line::from(s.text.as_str().fg(theme().accent)),
         None if app.filtering() => {
             let mut spans = vec![
-                "/".fg(ACCENT).bold(),
+                "/".fg(theme().accent).bold(),
                 app.filter
                     .as_ref()
                     .map_or("", |f| f.input.text.as_str())
@@ -891,7 +899,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 fn browse_hints(app: &App, width: usize) -> Line<'static> {
     let mut prefix: Vec<Span> = Vec::new();
     let mut keys: Vec<(&str, &str)> = if !app.marks.is_empty() {
-        prefix.push(format!("{} marked  ", app.marks.len()).fg(MARK).bold());
+        prefix.push(
+            format!("{} marked  ", app.marks.len())
+                .fg(theme().mark)
+                .bold(),
+        );
         vec![
             ("x", "cut"),
             ("y", "copy"),
@@ -907,11 +919,15 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
             } else {
                 format!("+ {n} copied  ")
             }
-            .fg(MARK)
+            .fg(theme().mark)
             .bold(),
         );
         if b.elsewhere(&app.sess.context) {
-            prefix.push(format!("from {}  ", b.context.name).fg(ACCENT).bold());
+            prefix.push(
+                format!("from {}  ", b.context.name)
+                    .fg(theme().accent)
+                    .bold(),
+            );
         }
         vec![
             ("p", "paste here"),
@@ -984,7 +1000,7 @@ fn browse_hints(app: &App, width: usize) -> Line<'static> {
 }
 
 fn hint(keys: &[(&str, &str)]) -> Line<'static> {
-    hint_in(keys, ACCENT)
+    hint_in(keys, theme().accent)
 }
 
 /// `[key] what it does` pairs, with the keys in `color`.
@@ -1029,14 +1045,14 @@ fn draw_sync(f: &mut Frame, app: &App, sync: &Sync) {
     let mut lines: Vec<Line> = Vec::new();
     let block = if sync.failed {
         lines.push(Line::from(vec![
-            "✗ ".fg(DANGER).bold(),
+            "✗ ".fg(theme().danger).bold(),
             format!("could not {verb} ").bold(),
             match sync.op {
                 Op::Pull => "from ",
                 Op::Push => "to ",
             }
             .bold(),
-            upstream.fg(DANGER).bold(),
+            upstream.fg(theme().danger).bold(),
         ]));
         lines.push("".into());
         lines.extend(tail.iter().map(|l| Line::from(l.clone().dim())));
@@ -1057,12 +1073,13 @@ fn draw_sync(f: &mut Frame, app: &App, sync: &Sync) {
         };
         keys.spans.insert(0, " ".into());
         keys.spans.push(" ".into());
-        popup(Line::from(format!(" git {verb} ")).bold(), DANGER).title_bottom(keys.right_aligned())
+        popup(Line::from(format!(" git {verb} ")).bold(), theme().danger)
+            .title_bottom(keys.right_aligned())
     } else {
         let elapsed = sync.started.elapsed();
         let frame = (elapsed.as_millis() / 80) as usize % SPINNER.len();
         lines.push(Line::from(vec![
-            SPINNER[frame].fg(ACCENT).bold(),
+            SPINNER[frame].fg(theme().accent).bold(),
             match sync.op {
                 Op::Pull => " pulling from ",
                 Op::Push => " pushing to ",
@@ -1079,7 +1096,7 @@ fn draw_sync(f: &mut Frame, app: &App, sync: &Sync) {
                 None => "".into(),
             });
         }
-        popup(Line::from(format!(" git {verb} ")).bold(), ACCENT)
+        popup(Line::from(format!(" git {verb} ")).bold(), theme().accent)
     };
     let width = (f.area().width * 6 / 10).max(50);
     // Long git errors wrap; size the popup for the wrapped text.
@@ -1153,24 +1170,15 @@ fn draw_confirm(f: &mut Frame, app: &App, confirm: &Confirm) {
     confirm_box(f, title, &question, default_yes);
 }
 
-/// Colors for the graph's lanes, by column, like `git log --graph`.
-const LANES: [Color; 6] = [
-    Color::Blue,
-    Color::Magenta,
-    Color::Cyan,
-    Color::Yellow,
-    Color::Green,
-    Color::Red,
-];
-
 /// git's ASCII graph redrawn with box-drawing lines, each lane in its own
 /// color, padded to `width` columns.
 fn graph_spans(graph: &str, width: usize) -> Vec<Span<'static>> {
+    let lanes = &theme().lanes;
     let mut spans: Vec<Span> = graph
         .chars()
         .enumerate()
         .map(|(i, ch)| {
-            let lane = LANES[(i / 2) % LANES.len()];
+            let lane = lanes[(i / 2) % lanes.len()];
             match ch {
                 '*' => "●".fg(lane).bold(),
                 '|' => "│".fg(lane),
@@ -1228,12 +1236,12 @@ fn draw_history(f: &mut Frame, app: &mut App) {
         .enumerate()
         .map(|(i, c)| {
             let bar = if selected == Some(i) {
-                BAR.fg(ACCENT)
+                BAR.fg(theme().accent)
             } else {
                 " ".into()
             };
             let flag = if h.unpushed.contains(&c.hash) {
-                "↑ ".fg(MARK)
+                "↑ ".fg(theme().mark)
             } else {
                 "  ".into()
             };
@@ -1246,7 +1254,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
                 .iter()
                 .any(|p| c.subject.starts_with(p))
             {
-                subject.fg(Color::Cyan)
+                subject.fg(theme().dir)
             } else {
                 subject.into()
             };
@@ -1274,13 +1282,14 @@ fn draw_history(f: &mut Frame, app: &mut App) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
-            " history ".fg(Color::LightMagenta).bg(SHADE).bold(),
+            " history ".fg(theme().mark).bg(theme().shade).bold(),
             " ".into(),
         ]))
-        .border_style(Style::new().fg(BORDER));
+        .border_style(Style::new().fg(theme().border));
     if !h.unpushed.is_empty() {
         block = block.title_top(
-            Line::from(format!(" ↑ {} not pushed ", h.unpushed.len()).fg(MARK)).right_aligned(),
+            Line::from(format!(" ↑ {} not pushed ", h.unpushed.len()).fg(theme().mark))
+                .right_aligned(),
         );
     }
     if let Some(i) = selected {
@@ -1291,7 +1300,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::new().bg(SHADE))
+            .highlight_style(Style::new().bg(theme().shade))
             .scroll_padding(2),
         top,
         &mut h.list,
@@ -1304,7 +1313,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
         block = block.title_top(
             Line::from(vec![
                 " ".into(),
-                c.short.clone().fg(MARK),
+                c.short.clone().fg(theme().mark),
                 format!(" · {} · {} ", c.author, ago(commit_time(c.time))).dim(),
             ])
             .right_aligned(),
@@ -1312,7 +1321,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
         if has_upstream {
             block = block.title_bottom(
                 if h.unpushed.contains(&c.hash) {
-                    Line::from(" ↑ not pushed yet ".fg(MARK))
+                    Line::from(" ↑ not pushed yet ".fg(theme().mark))
                 } else {
                     Line::from(" ✓ pushed ".dim())
                 }
@@ -1320,7 +1329,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
             );
         }
         if c.parents > 1 {
-            lines.push("merge — against its first parent:".fg(DIR).into());
+            lines.push("merge — against its first parent:".fg(theme().dir).into());
         }
         if h.changes.is_empty() {
             lines.push("no file changes".dim().into());
@@ -1333,16 +1342,16 @@ fn draw_history(f: &mut Frame, app: &mut App) {
         };
         for change in &h.changes[..shown] {
             let (sign, color) = match change.status {
-                'A' | 'C' => ("+ ", ACCENT),
-                'D' => ("− ", DANGER),
-                'R' => ("→ ", DIR),
-                _ => ("~ ", MARK),
+                'A' | 'C' => ("+ ", theme().accent),
+                'D' => ("− ", theme().danger),
+                'R' => ("→ ", theme().dir),
+                _ => ("~ ", theme().mark),
             };
             let name = |file: &str| -> Vec<Span<'static>> {
                 match history::store_path(file) {
                     Some(p) => {
                         let style = if files.is_file(&p) {
-                            Style::new().fg(FILE)
+                            Style::new().fg(theme().file)
                         } else {
                             Style::new()
                         };
@@ -1354,7 +1363,7 @@ fn draw_history(f: &mut Frame, app: &mut App) {
             let mut spans = vec![sign.fg(color).bold()];
             spans.extend(name(&change.path));
             if let Some(to) = &change.to {
-                spans.push(" → ".fg(DIR));
+                spans.push(" → ".fg(theme().dir));
                 spans.extend(name(to));
             }
             lines.push(Line::from(spans));
@@ -1371,8 +1380,11 @@ fn draw_history(f: &mut Frame, app: &mut App) {
 
     // Footer.
     let line = match &app.status {
-        Some(s) if s.error => Line::from(vec!["✗ ".fg(DANGER).bold(), s.text.as_str().fg(DANGER)]),
-        Some(s) => Line::from(s.text.as_str().fg(ACCENT)),
+        Some(s) if s.error => Line::from(vec![
+            "✗ ".fg(theme().danger).bold(),
+            s.text.as_str().fg(theme().danger),
+        ]),
+        Some(s) => Line::from(s.text.as_str().fg(theme().accent)),
         None => hint_fit(
             &[
                 ("j k", "move"),
@@ -1420,7 +1432,11 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// A yes/no question in a popup, colored by its default answer.
 fn confirm_box(f: &mut Frame, title: &str, question: &str, default_yes: bool) {
-    let color = if default_yes { ACCENT } else { DANGER };
+    let color = if default_yes {
+        theme().accent
+    } else {
+        theme().danger
+    };
     // The default answer is bracketed in its color; the other is dim.
     let button = |key: &str, label: &str, default: bool| -> Vec<Span<'static>> {
         if default {
@@ -1514,16 +1530,17 @@ fn draw_help(f: &mut Frame) {
             &[
                 (":", "commands (type to narrow them)"),
                 ("C", "switch context (work, personal…)"),
+                (":theme", "change the colors"),
                 ("R", "refresh"),
                 ("q", "quit (offers to push)"),
             ],
         ),
     ];
     let group_lines = |(name, rows): &(&str, &[(&str, &str)])| -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(name.to_uppercase()).fg(DIR).bold()];
+        let mut lines = vec![Line::from(name.to_uppercase()).fg(theme().dir).bold()];
         lines.extend(rows.iter().map(|(k, desc)| {
             Line::from(vec![
-                format!("{k:<11}").fg(ACCENT).bold(),
+                format!("{k:<11}").fg(theme().accent).bold(),
                 desc.to_string().into(),
             ])
         }));
@@ -1539,7 +1556,7 @@ fn draw_help(f: &mut Frame) {
     const COL: u16 = 46;
     let screen = f.area();
     let two = screen.width >= 2 * COL + 6;
-    let block = popup(Line::from(" keys ").bold(), ACCENT)
+    let block = popup(Line::from(" keys ").bold(), theme().accent)
         .title_bottom(Line::from(" any key closes ".dim()).right_aligned())
         .padding(Padding::new(2, 2, 1, 1));
     if two {
@@ -1571,8 +1588,8 @@ fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selecte
     let mut lines: Vec<Line> = Vec::new();
     if let Some(spec) = palette.command {
         lines.push(Line::from(vec![
-            format!(":{} ", spec.name).fg(ACCENT).bold(),
-            spec.usage.to_string().fg(ACCENT),
+            format!(":{} ", spec.name).fg(theme().accent).bold(),
+            spec.usage.to_string().fg(theme().accent),
             format!("  {}", spec.desc).dim(),
         ]));
     }
@@ -1581,26 +1598,26 @@ fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selecte
     let width = footer.width.min(96);
     for (i, s) in palette.items.iter().enumerate().skip(start).take(ROWS) {
         let bar = if i == selected {
-            BAR.fg(ACCENT)
+            BAR.fg(theme().accent)
         } else {
             " ".into()
         };
         let mut spans = vec![bar];
         match &s.item {
             palette::Item::Command(spec) => {
-                spans.push(format!("{:<9}", spec.name).fg(ACCENT).bold());
+                spans.push(format!("{:<9}", spec.name).fg(theme().accent).bold());
                 let usage = truncate(spec.usage, 34);
                 spans.push(format!("{usage:<35}").dim());
                 spans.push(spec.desc.into());
             }
             palette::Item::Word { label, note } => {
-                spans.push(format!("{label:<9}").fg(ACCENT).bold());
+                spans.push(format!("{label:<9}").fg(theme().accent).bold());
                 spans.push(note.clone().dim());
             }
             palette::Item::Path { label, is_dir } => {
                 if *is_dir {
-                    spans.push(folder_icon(false).fg(DIR));
-                    spans.push(label.clone().fg(DIR).bold());
+                    spans.push(folder_icon(false).fg(theme().dir));
+                    spans.push(label.clone().fg(theme().dir).bold());
                 } else {
                     spans.push("• ".dim());
                     spans.push(label.clone().into());
@@ -1609,7 +1626,7 @@ fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selecte
         }
         let mut line = Line::from(spans);
         if i == selected {
-            line = line.bg(SHADE);
+            line = line.bg(theme().shade);
         }
         lines.push(line);
     }
@@ -1624,7 +1641,7 @@ fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selecte
     keys.spans.push(" ".into());
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(theme().accent))
         .title_bottom(keys.right_aligned());
     if more > 0 {
         block = block.title_bottom(format!(" {more} more ").dim());
@@ -1637,7 +1654,10 @@ fn draw_palette(f: &mut Frame, footer: Rect, palette: &palette::Palette, selecte
 fn draw_generate(f: &mut Frame, form: &Form) {
     let label = |name: &str, field: Field| -> Vec<Span<'static>> {
         if form.field == field {
-            vec![BAR.fg(ACCENT), format!("{name:<8}").fg(ACCENT).bold()]
+            vec![
+                BAR.fg(theme().accent),
+                format!("{name:<8}").fg(theme().accent).bold(),
+            ]
         } else {
             vec![" ".into(), format!("{name:<8}").dim()]
         }
@@ -1645,14 +1665,17 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     // Every option keeps its padding, so nothing shifts as the choice moves.
     let choice = |name: &str, chosen: bool| -> Span<'static> {
         if chosen {
-            format!(" {name} ").fg(ACCENT).bg(SHADE).bold()
+            format!(" {name} ")
+                .fg(theme().accent)
+                .bg(theme().shade)
+                .bold()
         } else {
             format!(" {name} ").dim()
         }
     };
     let checkbox = |on: bool| -> Span<'static> {
         if on {
-            "[x]".fg(ACCENT).bold()
+            "[x]".fg(theme().accent).bold()
         } else {
             "[ ]".dim()
         }
@@ -1666,7 +1689,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     let icon = |glyph: char, field: Field| -> Span<'static> {
         let glyph = format!("  {glyph}");
         if form.field == field {
-            glyph.fg(ACCENT)
+            glyph.fg(theme().accent)
         } else {
             glyph.dim()
         }
@@ -1691,7 +1714,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
             Field::Login => {
                 let mut row = label("login", field);
                 if form.login.text.is_empty() && form.field != field {
-                    row.push(format!(" {:<wide$}", "optional").bg(FIELD).dim());
+                    row.push(format!(" {:<wide$}", "optional").bg(theme().field).dim());
                 } else {
                     let (spans, col) =
                         text_field("", &form.login.text, form.login.cursor_col(), wide);
@@ -1726,7 +1749,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
                     // attack; a PIN is short on purpose, guarded by whatever
                     // asks for it.
                     row.push(if bits < 64.0 && chosen != Kind::Digits {
-                        format!(" · {bits} bits, weak").fg(MARK)
+                        format!(" · {bits} bits, weak").fg(theme().mark)
                     } else {
                         format!(" · {bits} bits").dim()
                     });
@@ -1766,8 +1789,11 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     }
     lines.push("".into());
     lines.push(match &form.error {
-        Some(e) if form.overwrite => Line::from(e.clone().fg(MARK)),
-        Some(e) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
+        Some(e) if form.overwrite => Line::from(e.clone().fg(theme().mark)),
+        Some(e) => Line::from(vec![
+            "✗ ".fg(theme().danger).bold(),
+            e.clone().fg(theme().danger),
+        ]),
         None if form.name.text.trim().is_empty() => {
             "no name: only copied to the clipboard, not saved"
                 .dim()
@@ -1803,7 +1829,7 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     };
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    let block = popup(Line::from(" generate ").bold(), ACCENT)
+    let block = popup(Line::from(" generate ").bold(), theme().accent)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
@@ -1861,9 +1887,51 @@ fn text_field(
         spans.push(if is_prefix { group.dim() } else { group.bold() });
     }
     spans.push(" ".repeat(width.saturating_sub(shown)).into());
-    let spans = spans.into_iter().map(|s| s.bg(FIELD)).collect();
+    let spans = spans.into_iter().map(|s| s.bg(theme().field)).collect();
     let col = 1 + (prefix_len + cursor).saturating_sub(start) + usize::from(skip > 0);
     (spans, col.min(width))
+}
+
+/// The theme picker: each theme's name and a swatch of its colors, drawn
+/// in the highlighted one.
+fn draw_themes(f: &mut Frame, selected: Option<usize>) {
+    let mut lines: Vec<Line> = THEMES
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let highlighted = selected == Some(i);
+            let mut spans = vec![
+                if highlighted {
+                    BAR.fg(theme().accent)
+                } else {
+                    " ".into()
+                },
+                {
+                    let name = format!(" {:<12}", t.name);
+                    if highlighted {
+                        name.fg(theme().accent).bold()
+                    } else {
+                        name.bold()
+                    }
+                },
+            ];
+            for color in [t.accent, t.dir, t.mark, t.file, t.danger, t.unlock] {
+                spans.push("● ".fg(color));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    lines.push("".into());
+    lines.push("all but default want a true-color terminal".dim().into());
+    let mut keys = hint(&[("⏎", "keep"), ("esc", "cancel")]);
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let block = popup(Line::from(" theme ").bold(), theme().accent)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(1, 2, 1, 1));
+    let area = popup_fixed(f.area(), 50, lines.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// The `C` popup: every context with its store, the current one marked;
@@ -1888,15 +1956,19 @@ fn draw_contexts(f: &mut Frame, app: &App, picker: &Picker) {
             let highlighted = picker.adding.is_none() && selected == Some(i);
             let mut spans = vec![
                 if highlighted {
-                    BAR.fg(ACCENT)
+                    BAR.fg(theme().accent)
                 } else {
                     " ".into()
                 },
-                if here { "● ".fg(ACCENT) } else { "  ".into() },
+                if here {
+                    "● ".fg(theme().accent)
+                } else {
+                    "  ".into()
+                },
                 {
                     let name = format!("{:<name_width$}", c.name);
                     if highlighted {
-                        name.fg(ACCENT).bold()
+                        name.fg(theme().accent).bold()
                     } else {
                         name.bold()
                     }
@@ -1904,7 +1976,7 @@ fn draw_contexts(f: &mut Frame, app: &App, picker: &Picker) {
                 format!("  {}", cut_left(crate::context::tilde(&c.path), path_width)).dim(),
             ];
             if c.identity.is_some() {
-                spans.push("  own key".fg(DIR));
+                spans.push("  own key".fg(theme().dir));
             }
             Line::from(spans)
         })
@@ -1914,8 +1986,8 @@ fn draw_contexts(f: &mut Frame, app: &App, picker: &Picker) {
     match &picker.adding {
         Some(input) => {
             lines.push(Line::from(vec![
-                BAR.fg(ACCENT),
-                "new ".fg(ACCENT).bold(),
+                BAR.fg(theme().accent),
+                "new ".fg(theme().accent).bold(),
                 input.text.clone().bold(),
             ]));
             cursor = Some((lines.len() - 1, 5 + input.cursor_col()));
@@ -1933,8 +2005,8 @@ fn draw_contexts(f: &mut Frame, app: &App, picker: &Picker) {
     }
     if let Some(e) = &picker.error {
         lines.push(Line::from(vec![
-            "✗ ".fg(DANGER).bold(),
-            e.clone().fg(DANGER),
+            "✗ ".fg(theme().danger).bold(),
+            e.clone().fg(theme().danger),
         ]));
     }
     let mut keys = if picker.adding.is_some() {
@@ -1944,7 +2016,7 @@ fn draw_contexts(f: &mut Frame, app: &App, picker: &Picker) {
     };
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
-    let block = popup(Line::from(" contexts ").bold(), ACCENT)
+    let block = popup(Line::from(" contexts ").bold(), theme().accent)
         .title_bottom(keys.right_aligned())
         .padding(Padding::new(1, 2, 1, 1));
     let area = popup_fixed(f.area(), width, lines.len() as u16 + 4);
@@ -1999,9 +2071,9 @@ fn input_line(
         "•".repeat(len)
     };
     let line = Line::from(vec![
-        label.fg(UNLOCK).bold(),
-        format!(" {dots:<w$}").bg(FIELD).bold(),
-        format!("  {icon}").fg(UNLOCK),
+        label.fg(theme().unlock).bold(),
+        format!(" {dots:<w$}").bg(theme().field).bold(),
+        format!("  {icon}").fg(theme().unlock),
     ]);
     (
         line,

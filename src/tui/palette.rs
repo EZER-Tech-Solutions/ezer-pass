@@ -17,6 +17,8 @@ pub enum Arg {
     Context,
     /// A file on disk, from the current directory, then store paths.
     File,
+    /// A color theme's name.
+    Theme,
 }
 
 pub struct Spec {
@@ -89,6 +91,7 @@ pub const SPECS: &[Spec] = &[
         "switch, add or manage contexts",
         Arg::Context,
     ),
+    spec("theme", "[name]", "change the colors", Arg::Theme),
     spec("pwd", "", "show the current folder", Arg::None),
     spec("help", "", "list the keys", Arg::None),
     spec("quit", "", "leave (offers to push)", Arg::None),
@@ -174,9 +177,14 @@ pub fn suggest(text: &str, store: &Store, cwd: &str) -> Palette {
     // The word being typed: everything after the last space.
     let start = text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
     let word = &text[start..];
-    if command.is_some_and(|s| s.arg == Arg::Context) {
+    let arg = command.map(|s| s.arg);
+    if matches!(arg, Some(Arg::Context | Arg::Theme)) {
         let before: Vec<&str> = text[..start].split_whitespace().collect();
         let words: Vec<(String, String)> = match (before.len(), before.get(1).copied()) {
+            (1, _) if arg == Some(Arg::Theme) => super::theme::THEMES
+                .iter()
+                .map(|t| (t.name.to_string(), String::new()))
+                .collect(),
             (1, _) => CONTEXT_WORDS
                 .iter()
                 .map(|(w, note)| (w.to_string(), note.to_string()))
@@ -291,7 +299,8 @@ mod tests {
     fn every_spec_is_a_real_command() {
         for s in SPECS {
             assert!(
-                crate::commands::COMMANDS.contains(&s.name),
+                // theme is the TUI's own.
+                crate::commands::COMMANDS.contains(&s.name) || s.name == "theme",
                 "{} is not a command",
                 s.name
             );

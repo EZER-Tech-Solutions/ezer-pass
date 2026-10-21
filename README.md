@@ -92,6 +92,7 @@ marked or cut.
 | `i` `n` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
 | `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
 | `C` | switch context: pick another vault, or `n` to add one (see [Contexts](#contexts)) |
+| `:theme` | pick a color theme — default, catppuccin, dracula, gruvbox, nord, tokyo-night or light — drawn as you move; `⏎` keeps it, `Esc` goes back. `:theme nord` sets one directly. All but default use 24-bit color. Remembered in `$XDG_STATE_HOME/ezer-pass/theme` |
 | `Esc` | clear the filter, then marks, then the buffer |
 | `R` / `?` / `q` | refresh / help / quit |
 

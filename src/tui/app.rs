@@ -4,6 +4,7 @@ use super::history::{self, History};
 use super::palette;
 use super::preview::Preview;
 use super::sync::{Op, Sync};
+use super::theme::{self, THEMES};
 use crate::commands::{self, COMMANDS, Session};
 use crate::context::{self, Context};
 use crate::crypto::{self, WrongPassphrase};
@@ -210,6 +211,12 @@ pub enum Mode {
     Insert(Insert),
     /// Picking a context (`C`).
     Contexts(Picker),
+    /// Picking a color theme (`:theme`); the highlighted one is drawn as
+    /// you move, and `before` comes back on esc.
+    Themes {
+        list: ListState,
+        before: usize,
+    },
 }
 
 pub struct Status {
@@ -834,7 +841,41 @@ impl App {
             Mode::Unlock(_) => self.unlock_key(key),
             Mode::Insert(_) => self.insert_key(key),
             Mode::Contexts(_) => self.contexts_key(key),
+            Mode::Themes { .. } => self.themes_key(key),
         }
+    }
+
+    fn themes_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Themes { list, before } = &mut self.mode else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let last = THEMES.len() - 1;
+        let at = list.selected().unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => list.select(Some((at + 1).min(last))),
+            KeyCode::Char('k') | KeyCode::Up => list.select(Some(at.saturating_sub(1))),
+            KeyCode::Home | KeyCode::Char('g') => list.select(Some(0)),
+            KeyCode::End | KeyCode::Char('G') => list.select(Some(last)),
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                theme::save();
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                theme::set(*before);
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            KeyCode::Char('c') if ctrl => {
+                theme::set(*before);
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            _ => {}
+        }
+        theme::set(list.selected().unwrap_or(0));
+        Effect::None
     }
 
     /// Let `effect` through if it needs no keys or they are unlocked;
@@ -2081,6 +2122,25 @@ impl App {
                     Err(e) => self.error(format!("{e:#}")),
                 }
             }
+            "theme" => match positional.first() {
+                None => {
+                    let before = theme::current();
+                    self.mode = Mode::Themes {
+                        list: ListState::default().with_selected(Some(before)),
+                        before,
+                    };
+                }
+                Some(name) => match theme::find(name) {
+                    Some(i) => {
+                        theme::set(i);
+                        theme::save();
+                    }
+                    None => self.error(format!(
+                        "no theme {name:?} (one of {})",
+                        THEMES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
+                    )),
+                },
+            },
             _ if COMMANDS.contains(&cmd) => {
                 // Quiet commands return straight to the TUI; anything that
                 // prints (generate, find, git log, ...) holds for a keypress.

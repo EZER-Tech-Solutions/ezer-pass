@@ -15,6 +15,8 @@ pub enum Arg {
     Dir,
     /// `context`'s subcommands, then context names.
     Context,
+    /// A file on disk, from the current directory, then store paths.
+    File,
 }
 
 pub struct Spec {
@@ -58,7 +60,7 @@ pub const SPECS: &[Spec] = &[
         "import",
         "[--force] <file> <entry>",
         "store a file as an entry",
-        Arg::None,
+        Arg::File,
     ),
     spec(
         "export",
@@ -198,6 +200,14 @@ pub fn suggest(text: &str, store: &Store, cwd: &str) -> Palette {
                 item: Item::Word { label, note },
             });
         }
+    } else if command.is_some_and(|s| s.arg == Arg::File)
+        && !word.starts_with('-')
+        && text[..start]
+            .split_whitespace()
+            .skip(1)
+            .all(|w| w.starts_with('-'))
+    {
+        items = files(&text[..start], word);
     } else if let Some(spec) = command
         && spec.arg != Arg::None
         && !word.starts_with('-')
@@ -211,7 +221,7 @@ pub fn suggest(text: &str, store: &Store, cwd: &str) -> Palette {
             .list(&folder)
             .unwrap_or_default()
             .into_iter()
-            .filter(|n| spec.arg == Arg::Path || n.is_dir)
+            .filter(|n| spec.arg != Arg::Dir || n.is_dir)
             .filter_map(|n| fuzzy::score(prefix, &n.name).map(|s| (s, n.name, n.is_dir)))
             .collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
@@ -226,6 +236,51 @@ pub fn suggest(text: &str, store: &Store, cwd: &str) -> Palette {
         }
     }
     Palette { command, items }
+}
+
+/// Files and folders on disk matching `word`, relative to the current
+/// directory (or `~`). Hidden ones only once `.` is typed.
+fn files(before: &str, word: &str) -> Vec<Suggestion> {
+    let (dir_part, prefix) = match word.rfind('/') {
+        Some(i) => word.split_at(i + 1),
+        None => ("", word),
+    };
+    let dir = match dir_part {
+        "" => Ok(".".into()),
+        d => crate::context::expand(d),
+    };
+    let Ok(read) = dir.and_then(|d| Ok(std::fs::read_dir(d)?)) else {
+        return Vec::new();
+    };
+    let mut ranked: Vec<(i64, String, bool)> = read
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with('.') && !prefix.starts_with('.') {
+                return None;
+            }
+            // Follows symlinks, so a link to a folder opens like one.
+            let is_dir = e.path().is_dir();
+            fuzzy::score(prefix, &name).map(|s| (s, name, is_dir))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
+    ranked
+        .into_iter()
+        .map(|(_, name, is_dir)| {
+            let label = format!("{dir_part}{name}{}", if is_dir { "/" } else { "" });
+            // A folder stays open for more typing; a file is a whole word.
+            let line = if is_dir {
+                format!("{before}{label}")
+            } else {
+                format!("{before}{} ", super::app::quote(&label))
+            };
+            Suggestion {
+                item: Item::Path { label, is_dir },
+                line,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -250,6 +305,28 @@ mod tests {
             assert!(words.contains(w), "{w} is missing from the palette");
         }
         assert_eq!(words.len(), crate::repl::CONTEXT_SUBCOMMANDS.len());
+    }
+
+    #[test]
+    fn files_complete_from_disk() {
+        let dir = std::env::temp_dir().join(format!("ezer-palette-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("keys")).unwrap();
+        std::fs::write(dir.join("my notes.txt"), "").unwrap();
+        std::fs::write(dir.join(".hidden"), "").unwrap();
+        let base = format!("{}/", dir.display());
+        let lines: Vec<String> = files("import ", &base)
+            .into_iter()
+            .map(|s| s.line)
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                format!("import {base}keys/"),
+                format!("import '{base}my notes.txt' "),
+            ]
+        );
+        assert_eq!(files("import ", &format!("{base}.h")).len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

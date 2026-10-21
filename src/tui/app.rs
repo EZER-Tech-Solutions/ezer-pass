@@ -2124,7 +2124,7 @@ fn free_copy_name(store: &store::Store, path: &str) -> String {
 
 /// Quote a name for the command line if `commands::tokenize` would split
 /// or unescape it.
-fn quote(name: &str) -> String {
+pub(super) fn quote(name: &str) -> String {
     if !name.is_empty()
         && !name
             .chars()

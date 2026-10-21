@@ -39,9 +39,10 @@ pub enum Effect {
     Pull,
     /// `git push` with the terminal handed over, then quit.
     Push,
-    /// Generate a password straight to the clipboard (the `g` form).
+    /// Generate a password straight to the clipboard (the `g` form),
+    /// saved to `path` if there is one.
     Generate {
-        path: String,
+        path: Option<String>,
         spec: Spec,
         length: u32,
         in_place: bool,
@@ -54,7 +55,7 @@ impl Effect {
         match self {
             // A new password opens in the view popup afterwards, so ask
             // before generating, not after.
-            Effect::Decrypt(_) | Effect::Copy(_) | Effect::Generate { .. } => true,
+            Effect::Decrypt(_) | Effect::Copy(_) | Effect::Generate { path: Some(_), .. } => true,
             Effect::Run(batch) => batch.jobs.iter().any(|j| commands::needs_keys(&j.argv)),
             _ => false,
         }
@@ -622,11 +623,23 @@ impl App {
         let Mode::Generate(form) = &mut self.mode else {
             return Effect::None;
         };
-        let name = form.name.text.trim();
-        if name.is_empty() {
-            form.error = Some("give it a name".into());
-            form.field = Field::Name;
+        let Some(length) = form.length() else {
+            form.error = Some(format!("length must be 1 to {}", generate::MAX_LENGTH));
+            form.field = Field::Length;
             return Effect::None;
+        };
+        let name = form.name.text.trim();
+        // No name: a password for somewhere else, only copied.
+        if name.is_empty() {
+            form.save_prefs();
+            let spec = form.spec();
+            self.mode = Mode::Browse;
+            return Effect::Generate {
+                path: None,
+                spec,
+                length,
+                in_place: false,
+            };
         }
         let path = store::resolve(&form.folder, name);
         if path.is_empty() || name.ends_with('/') || store.is_dir(&path) {
@@ -637,11 +650,6 @@ impl App {
             form.field = Field::Name;
             return Effect::None;
         }
-        let Some(length) = form.length() else {
-            form.error = Some(format!("length must be 1 to {}", generate::MAX_LENGTH));
-            form.field = Field::Length;
-            return Effect::None;
-        };
         let in_place = store.is_entry(&path);
         if in_place && !form.overwrite {
             form.overwrite = true;
@@ -655,10 +663,21 @@ impl App {
         let spec = form.spec();
         self.mode = Mode::Browse;
         Effect::Generate {
-            path,
+            path: Some(path),
             spec,
             length,
             in_place,
+        }
+    }
+
+    /// A password for no entry is on the clipboard.
+    pub fn finish_generate_unsaved(&mut self, result: Result<()>) {
+        match result {
+            Ok(()) => self.info(format!(
+                "copied a new password to the clipboard (not saved); it clears in {}s",
+                self.clip_time.as_secs()
+            )),
+            Err(e) => self.error(format!("{e:#}")),
         }
     }
 

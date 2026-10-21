@@ -123,12 +123,21 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
             spec,
             length,
             in_place,
-        } => {
-            let result = commands::generate(&mut app.sess, &path, &spec, length as usize, in_place)
-                .and_then(|password| clipboard::copy(&password));
-            let next = app.finish_generate(path, result);
-            perform(terminal, app, next)?;
-        }
+        } => match path {
+            Some(path) => {
+                let result =
+                    commands::generate(&mut app.sess, &path, &spec, length as usize, in_place)
+                        .and_then(|password| clipboard::copy(&password));
+                let next = app.finish_generate(path, result);
+                perform(terminal, app, next)?;
+            }
+            None => {
+                let result = spec
+                    .generate(length as usize)
+                    .and_then(|password| clipboard::copy(&password));
+                app.finish_generate_unsaved(result);
+            }
+        },
         Effect::Pull => {
             let result = suspended(terminal, || {
                 pause_on_err(git::interactive(

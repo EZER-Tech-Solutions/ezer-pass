@@ -1698,6 +1698,11 @@ fn draw_generate(f: &mut Frame, form: &Form) {
     lines.push(match &form.error {
         Some(e) if form.overwrite => Line::from(e.clone().fg(MARK)),
         Some(e) => Line::from(vec!["✗ ".fg(DANGER).bold(), e.clone().fg(DANGER)]),
+        None if form.name.text.trim().is_empty() => {
+            "no name: only copied to the clipboard, not saved"
+                .dim()
+                .into()
+        }
         None => "copied to the clipboard, never shown unless you reveal it"
             .dim()
             .into(),

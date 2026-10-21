@@ -271,8 +271,8 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [-c] [-f] [-i] <entry> [length]",
-                1,
+                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [-c] [-f] [-i] [entry] [length]",
+                0,
                 2,
             )?;
             cmd_generate(sess, &flags, &positional)?
@@ -608,8 +608,13 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
     if spec.kind == Kind::Passphrase && (spec.no_look_alikes || !spec.exclude.is_empty()) {
         bail!("--no-ambiguous and --exclude don't apply to a passphrase");
     }
-    let path = sess.resolve(positional[0]);
-    let length = match positional.get(1) {
+    // A lone number is a length: the password is for somewhere else, not
+    // an entry.
+    let (entry, length) = match positional {
+        [n] if n.bytes().all(|b| b.is_ascii_digit()) => (None, Some(*n)),
+        _ => (positional.first().copied(), positional.get(1).copied()),
+    };
+    let length = match length {
         Some(n) => n
             .parse::<usize>()
             .ok()
@@ -618,6 +623,23 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
         None if spec.kind == Kind::Passphrase => password::DEFAULT_WORDS as usize,
         None => default_length() as usize,
     };
+    let Some(entry) = entry else {
+        if has(&["-i", "--in-place"]) {
+            bail!("-i needs an entry");
+        }
+        let password = spec.generate(length)?;
+        if has(&["-c", "--clip"]) {
+            clipboard::copy(&password)?;
+            println!(
+                "copied a new password to the clipboard (not saved); it clears in {} seconds",
+                clipboard::clear_after()
+            );
+        } else {
+            println!("{}", password.yellow().bold());
+        }
+        return Ok(());
+    };
+    let path = sess.resolve(entry);
     if sess.store.is_dir(&path) {
         bail!("{} is a folder", store::display(&path));
     }
@@ -1481,8 +1503,8 @@ fn print_help() {
         "add an entry (-m several lines, -e echo)",
     );
     entry(
-        "generate [-c] [-i] [-f] <entry> [len]",
-        "generate a password (-c copy it, -i replace only the first line)",
+        "generate [-c] [-i] [-f] [entry] [len]",
+        "generate a password (-c copy it, -i replace only the first line; no entry: not saved)",
     );
     entry(
         "  -n | --url-safe | --digits | --hex",

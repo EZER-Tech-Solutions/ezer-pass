@@ -100,13 +100,18 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
                 for job in &batch.jobs {
                     println!("{} {}", ":".green().bold(), job.argv.join(" "));
                     if let Err(e) = commands::run(&mut app.sess, &job.argv) {
-                        eprintln!("{} {e:#}", "error:".red().bold());
+                        // The TUI's footer shows the error; only git's own
+                        // stderr needs holding on screen to be read.
+                        if job.argv[0] == "git" {
+                            eprintln!("{} {e:#}", "error:".red().bold());
+                            wait_for_enter();
+                        }
                         result = Err(e);
                         break;
                     }
                     done += 1;
                 }
-                if matches!(batch.pause, Pause::Always) || result.is_err() {
+                if matches!(batch.pause, Pause::Always) && result.is_ok() {
                     wait_for_enter();
                 }
                 (done, result)

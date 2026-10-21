@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let [tree, bottom, footer] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(7),
-        Constraint::Length(1),
+        Constraint::Length(footer_rows(app, f.area().width)),
     ])
     .areas(f.area());
     let [recent, info] =
@@ -801,6 +801,36 @@ fn draw_view(f: &mut Frame, app: &App) {
     );
 }
 
+/// The footer's height: one row, or up to three for an error that needs
+/// them to be read whole.
+fn footer_rows(app: &App, width: u16) -> u16 {
+    match (&app.mode, &app.status) {
+        (Mode::Command(_) | Mode::Filter, _) => 1,
+        (_, Some(s)) if s.error => wrapped_rows(&format!("✗ {}", s.text), width).min(3),
+        _ => 1,
+    }
+}
+
+/// How many rows `text` takes word-wrapped to `width` columns.
+fn wrapped_rows(text: &str, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let (mut rows, mut col) = (1, 0);
+    for word in text.split_whitespace() {
+        let w = Span::raw(word).width();
+        if col > 0 && col + 1 + w > width {
+            rows += 1;
+            col = 0;
+        }
+        col += if col > 0 { 1 } else { 0 } + w;
+        // A word wider than the row breaks across rows.
+        while col > width {
+            rows += 1;
+            col -= width;
+        }
+    }
+    rows
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let input = match &app.mode {
         Mode::Command(input) => {
@@ -833,7 +863,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let line = match &app.status {
-        Some(s) if s.error => Line::from(vec!["✗ ".fg(DANGER).bold(), s.text.as_str().fg(DANGER)]),
+        Some(s) if s.error => {
+            let line = Line::from(vec!["✗ ".fg(DANGER).bold(), s.text.as_str().fg(DANGER)]);
+            f.render_widget(Paragraph::new(line).wrap(Wrap { trim: true }), area);
+            return;
+        }
         Some(s) => Line::from(s.text.as_str().fg(ACCENT)),
         None if app.filtering() => {
             let mut spans = vec![
@@ -1904,6 +1938,25 @@ mod tests {
                 context_only: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn wrapped_rows_match_the_paragraph() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+        let text = "✗ big.iso is 5242880 bytes (limit 1048576); a password store is a \
+                    poor home for large blobs — pass --force to import anyway";
+        for width in [20, 37, 60, 80, 119, 200] {
+            let area = Rect::new(0, 0, width, 10);
+            let mut buf = Buffer::empty(area);
+            Paragraph::new(text)
+                .wrap(Wrap { trim: true })
+                .render(area, &mut buf);
+            let used = (0..10)
+                .filter(|&y| (0..width).any(|x| buf[(x, y)].symbol() != " "))
+                .count() as u16;
+            assert_eq!(wrapped_rows(text, width), used, "width {width}");
+        }
     }
 
     #[test]

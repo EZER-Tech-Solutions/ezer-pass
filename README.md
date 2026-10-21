@@ -17,6 +17,7 @@ paths, and storing anything that isn't text.
   back out, with automatic detection on read.
 - **Contexts** — keep separate vaults (work, personal, a client's) side by
   side, each its own store and git repo, and switch between them with `C`.
+- **Browser** — fill logins with the browserpass extension.
 
 Entry *contents* are encrypted; folder and entry *names* are not, just as with
 `pass`.
@@ -381,6 +382,39 @@ Enter again to write the original filename to the current directory. `c` won't
 copy a file entry (it would only grab the marker line). Imports over 1 MiB are
 refused without `--force` — a password store is a poor home for large blobs.
 
+## Browser
+
+ezer-pass works with the [browserpass](https://github.com/browserpass/browserpass-extension)
+extension (Firefox, Chromium, Chrome, Brave, Vivaldi), which fills logins from
+the store. It answers the extension in place of browserpass's own host, which
+only reads gpg:
+
+```sh
+ezer-pass browserpass install   # register with every browser found
+ezer-pass unlock                # before using the extension
+```
+
+Then install the extension from your browser's add-on store. With no stores set
+in its options it uses the current context's store; to see other contexts too,
+add each one there by its path. Entries are read the way browserpass reads them:
+the password on the first line, then `login:`, `url:` and other `key: value`
+lines. Its "edit" and "delete" buttons work too, and are committed like any
+other change. File entries aren't listed.
+
+The browser runs the host with no terminal to ask a passphrase on, so
+`ezer-pass unlock` hands it to the *agent*, a background ezer-pass that keeps
+the identity unlocked in memory and decrypts for the host. The key never
+leaves the agent, which answers only your own user. It forgets the key and
+exits after 15 minutes unused (`EZER_PASS_AGENT_TIMEOUT`), or on
+`ezer-pass lock`. Until then, the extension reports that ezer-pass is locked.
+An identity without a passphrase needs no agent. Nothing else uses the agent:
+the TUI and commands still ask for the passphrase themselves.
+
+`ezer-pass browserpass uninstall` undoes `install`. If browserpass's own host
+(`browserpass-native`) is installed, `install` refuses to replace it unless
+given `--force`, and says so if it is installed for every user, as a browser
+may run that one instead.
+
 ## Environment
 
 | Variable | Effect |
@@ -389,6 +423,7 @@ refused without `--force` — a password store is a poor home for large blobs.
 | `EZER_PASS_CONTEXT` | context to open, like `-C` (default: the one last switched to) |
 | `EZER_PASS_IDENTITY` | identity file for every context (default `$XDG_CONFIG_HOME/ezer-pass/identity.age`, or a context's own) |
 | `PASSWORD_STORE_CLIP_TIME` | seconds a copied password stays on the clipboard, and before a revealed one re-masks in the TUI (default 45) |
+| `EZER_PASS_AGENT_TIMEOUT` | seconds the agent keeps the identity unlocked for the browser after it was last used; 0 until `ezer-pass lock` (default 900) |
 | `PASSWORD_STORE_GENERATED_LENGTH` | default length for `generate` (default 25) |
 | `VISUAL` / `EDITOR` | editor for `edit` (default `vi`) |
 | `XDG_STATE_HOME` | history file location (default `~/.local/state`) |

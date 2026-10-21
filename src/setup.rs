@@ -22,13 +22,23 @@ pub fn unlock_on_terminal(path: &Path) -> Result<Keys> {
     if !crypto::needs_passphrase(path)? {
         return crypto::unlock(path, None);
     }
+    ask_passphrase(path, |passphrase| crypto::unlock(path, Some(passphrase)))
+}
+
+/// Ask for the passphrase of the identity at `path` on the terminal and
+/// hand it to `try_it`, asking again (three tries in all) while that fails
+/// with `WrongPassphrase`.
+pub fn ask_passphrase<T>(
+    path: &Path,
+    mut try_it: impl FnMut(&SecretString) -> Result<T>,
+) -> Result<T> {
     let mut tries = 0;
     loop {
         let passphrase = SecretString::from(rpassword::prompt_password(format!(
             "passphrase for {}: ",
             tilde(path)
         ))?);
-        match crypto::unlock(path, Some(&passphrase)) {
+        match try_it(&passphrase) {
             Err(e) if e.is::<WrongPassphrase>() && tries < 2 => {
                 eprintln!("{}", "wrong passphrase, try again".red());
                 tries += 1;

@@ -2,7 +2,7 @@ use crate::context;
 use crate::crypto::{self, Keys};
 use crate::password::{Kind, Spec};
 use crate::store::{self, EXT};
-use crate::{clipboard, fileio, git, index, setup};
+use crate::{agent, clipboard, fileio, git, index, setup};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::io::{BufRead, Read, Write};
@@ -12,8 +12,8 @@ use zeroize::Zeroizing;
 /// Every command `run` understands, for completion and the TUI's command line.
 pub const COMMANDS: &[&str] = &[
     "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "reindex", "generate",
-    "edit", "rm", "mv", "cp", "find", "grep", "git", "init", "migrate", "context", "help", "exit",
-    "quit",
+    "edit", "rm", "mv", "cp", "find", "grep", "git", "init", "migrate", "unlock", "lock",
+    "context", "help", "exit", "quit",
 ];
 
 pub struct Session {
@@ -339,6 +339,15 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             expect_args(&positional, "migrate", 0, 0)?;
             setup::migrate(sess)?
         }
+        "unlock" => {
+            expect_args(&positional, "unlock", 0, 0)?;
+            agent::unlock(&sess.context.identity()?)?
+        }
+        "lock" => {
+            expect_args(&positional, "lock", 0, 0)?;
+            agent::lock()?
+        }
+        "browserpass" => bail!("run `ezer-pass browserpass` on its own, not in a session"),
         "help" | "?" => print_help(),
         "exit" | "quit" if sess.interactive => return Ok(Outcome::Exit),
         // Bare directory name acts like `cd` in the REPL.
@@ -1512,6 +1521,17 @@ fn print_help() {
         "migrate",
         "move a store made by `pass` from gpg to age, once",
     );
+    println!();
+    section("browser (the browserpass extension)");
+    entry(
+        "browserpass install",
+        "let the extension read the store (run from a shell)",
+    );
+    entry(
+        "unlock",
+        "keep the identity unlocked for the extension, until idle",
+    );
+    entry("lock", "forget it again");
     println!();
     section("contexts (named stores: work, personal, ...)");
     entry("context [list]", "list them; ● marks the one you are in");

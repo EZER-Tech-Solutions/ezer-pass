@@ -42,7 +42,7 @@ impl Context {
     }
 }
 
-fn home() -> Result<PathBuf> {
+pub fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(
         std::env::var_os("HOME").context("HOME is not set")?,
     ))

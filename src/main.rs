@@ -3,6 +3,8 @@
 //!
 //! This is the main entry point of the ezer-pass program, a password manager written in Rust. It picks the context (named store) to work in, opens its password store, processes command-line arguments, and either runs a REPL (Read-Eval-Print Loop) for interactive use or executes commands based on the provided arguments. The program handles errors gracefully and returns appropriate exit codes.
 
+mod agent;
+mod browserpass;
 mod clipboard;
 mod commands;
 mod context;
@@ -29,6 +31,27 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some(clipboard::CLEAR_ARG) {
         clipboard::run_clearer(args.get(1).map_or("", String::as_str));
         return ExitCode::SUCCESS;
+    }
+    // The agent, started by `unlock`.
+    if args.first().map(String::as_str) == Some(agent::AGENT_ARG) {
+        return match agent::serve() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    // The browser extension's host works on whichever stores the extension
+    // names, not on a context.
+    if args.first().map(String::as_str) == Some("browserpass") {
+        return match browserpass::run(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ezer-pass: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     // `-C <name>` / `--context <name>` picks the context (named store) for

@@ -385,9 +385,9 @@ refused without `--force` — a password store is a poor home for large blobs.
 ## Browser
 
 ezer-pass works with the [browserpass](https://github.com/browserpass/browserpass-extension)
-extension (Firefox, Chromium, Chrome, Brave, Vivaldi), which fills logins from
-the store. It answers the extension in place of browserpass's own host, which
-only reads gpg:
+extension (Firefox, Zen, LibreWolf, Chromium, Chrome, Brave, Vivaldi, Helium),
+which fills logins from the store. It answers the extension in place of
+browserpass's own host, which only reads gpg:
 
 ```sh
 ezer-pass browserpass install   # register with every browser found

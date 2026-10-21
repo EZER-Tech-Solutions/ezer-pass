@@ -438,6 +438,13 @@ const BROWSERS: &[Browser] = &[
         firefox: true,
     },
     Browser {
+        name: "Zen",
+        dir: ".zen",
+        hosts: ".zen/native-messaging-hosts",
+        config: false,
+        firefox: true,
+    },
+    Browser {
         name: "Chromium",
         dir: "chromium",
         hosts: "chromium/NativeMessagingHosts",
@@ -462,6 +469,13 @@ const BROWSERS: &[Browser] = &[
         name: "Vivaldi",
         dir: "vivaldi",
         hosts: "vivaldi/NativeMessagingHosts",
+        config: true,
+        firefox: false,
+    },
+    Browser {
+        name: "Helium",
+        dir: "net.imput.helium",
+        hosts: "net.imput.helium/NativeMessagingHosts",
         config: true,
         firefox: false,
     },

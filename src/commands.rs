@@ -6,7 +6,7 @@ use crate::{agent, clipboard, fileio, git, index, setup};
 use age::x25519::Recipient;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -211,8 +211,13 @@ fn entry_file(path: &str) -> String {
     format!("{path}{EXT}")
 }
 
-/// Ask a yes/no question on the terminal; anything but y/yes is no.
+/// Ask a yes/no question on the terminal; anything but y/yes is no. With no
+/// terminal to ask on (a script, or a coding agent), fail rather than take
+/// silence as no and report success for a command that did nothing.
 fn confirm(question: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        bail!("{question} (no terminal to ask on; pass -f to go ahead)");
+    }
     print!("{question} [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();

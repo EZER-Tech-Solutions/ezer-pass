@@ -144,7 +144,7 @@ hunter2
 
 | Command | Description |
 |---|---|
-| `ls [path]` | list a store directory |
+| `ls [-r] [path]` | list a store directory; `-r` prints every folder and entry under it as full paths, one a line — the store's shape in one call, for scripts and coding agents (it decrypts nothing) |
 | `cd [path]` / `pwd` | move around the store |
 | `mkdir <path>` | create a directory (git tracks it once it holds an entry) |
 | `show [-c] <entry>` | print an entry, or `-c` to copy its first line (cleared after 45 s) |

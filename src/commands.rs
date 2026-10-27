@@ -252,8 +252,9 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
 
     match cmd {
         "ls" | "list" => {
-            expect_args(&positional, "ls [path]", 0, 1)?;
-            cmd_ls(sess, positional.first().copied().unwrap_or(""))?
+            expect_args(&positional, "ls [-r] [path]", 0, 1)?;
+            let recursive = flags.iter().any(|f| matches!(*f, "-r" | "--recursive"));
+            cmd_ls(sess, positional.first().copied().unwrap_or(""), recursive)?
         }
         "cd" => {
             expect_args(&positional, "cd [path]", 0, 1)?;
@@ -515,9 +516,11 @@ fn init_store(sess: &mut Session, target: &context::Context) -> Result<()> {
 }
 
 /// List the contents of a store directory, or show a single entry.
-fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
+fn cmd_ls(sess: &Session, arg: &str, recursive: bool) -> Result<()> {
     let path = sess.resolve(arg);
-    if sess.store.is_dir(&path) {
+    if recursive && sess.store.is_dir(&path) {
+        print_tree(sess, &path);
+    } else if sess.store.is_dir(&path) {
         let nodes = sess.store.list(&path)?;
         if nodes.is_empty() {
             println!("{}", "(empty)".dimmed());
@@ -537,6 +540,36 @@ fn cmd_ls(sess: &Session, arg: &str) -> Result<()> {
         bail!("{} is not in the password store", store::display(&path));
     }
     Ok(())
+}
+
+/// `ls -r`: every folder and entry under `dir`, one full store path a line,
+/// so a script (or a coding agent) sees the store's shape in one call.
+fn print_tree(sess: &Session, dir: &str) {
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    let mut paths: Vec<_> = sess
+        .store
+        .walk()
+        .into_iter()
+        .filter(|(path, _)| path.starts_with(&prefix))
+        .collect();
+    // Each folder's contents right under it.
+    paths.sort_by(|(a, _), (b, _)| a.split('/').cmp(b.split('/')));
+    if paths.is_empty() {
+        println!("{}", "(empty)".dimmed());
+    }
+    for (path, is_dir) in paths {
+        if is_dir {
+            println!("{}", store::display_dir(&path).blue().bold());
+        } else if sess.files.is_file(&path) {
+            println!("{}", store::display(&path).magenta());
+        } else {
+            println!("{}", store::display(&path));
+        }
+    }
 }
 
 /// Show the contents of a store entry, optionally copying it to the clipboard.
@@ -1579,7 +1612,10 @@ fn print_help() {
     let section = |title: &str| println!("{}", title.yellow().bold());
 
     section("navigation");
-    entry("ls [path]", "list the current (or given) directory");
+    entry(
+        "ls [-r] [path]",
+        "list the current (or given) directory; -r every path under it",
+    );
     entry(
         "cd [path]",
         "change directory (.., /, subdirs); bare dir names also work",

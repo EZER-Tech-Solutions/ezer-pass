@@ -34,10 +34,10 @@ pub fn ask_passphrase<T>(
 ) -> Result<T> {
     let mut tries = 0;
     loop {
-        let passphrase = SecretString::from(rpassword::prompt_password(format!(
-            "passphrase for {}: ",
-            tilde(path)
-        ))?);
+        let passphrase = SecretString::from(
+            rpassword::prompt_password(format!("passphrase for {}: ", tilde(path)))
+                .context("no terminal to ask the passphrase on: run `ezer-pass unlock` first")?,
+        );
         match try_it(&passphrase) {
             Err(e) if e.is::<WrongPassphrase>() && tries < 2 => {
                 eprintln!("{}", "wrong passphrase, try again".red());
@@ -124,7 +124,7 @@ pub fn init(sess: &mut Session, args: &[String]) -> Result<()> {
     }
     ensure_identity(sess)?;
     if keys.is_empty() {
-        keys = sess.unlock()?.recipients();
+        keys = sess.own_recipients()?;
     }
     let before = sess.store.recipients(&dir).ok().map(|(_, r)| sorted(&r));
     write_recipients(sess, &dir, &keys)?;
@@ -243,7 +243,7 @@ pub fn migrate(sess: &mut Session) -> Result<()> {
     ensure_identity(sess)?;
     let made_recipients = sess.store.recipients("").is_err();
     if made_recipients {
-        let keys = sess.unlock()?.recipients();
+        let keys = sess.own_recipients()?;
         write_recipients(sess, "", &keys)?;
     }
     // Check every entry has recipients before decrypting anything.

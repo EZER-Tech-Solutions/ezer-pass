@@ -255,7 +255,10 @@ in `~/.config/ezer-pass/identity.age`, encrypted with your passphrase.
   with others, and re-encrypts what is already there. Entries moved or copied
   into it are re-encrypted for them too.
 - The passphrase is asked once per TUI or explore session and the unlocked key
-  is kept in memory only. A plain, unencrypted identity file (as made by
+  is kept in memory only. While the agent holds it (`ezer-pass unlock`, below),
+  commands ask nothing: `show`, `export` and the rest decrypt through it, so a
+  script or a tool that runs ezer-pass with no terminal can read the store. A
+  command that needs your public key (`init`, `migrate`) still asks. A plain, unencrypted identity file (as made by
   `age-keygen`) also works and is never asked about.
 - Back the identity up: without it and its passphrase nothing in the store can
   be read. To use the store on another machine, copy the identity there and
@@ -408,8 +411,10 @@ the identity unlocked in memory and decrypts for the host. The key never
 leaves the agent, which answers only your own user. It forgets the key and
 exits after 15 minutes unused (`EZER_PASS_AGENT_TIMEOUT`), or on
 `ezer-pass lock`. Until then, the extension reports that ezer-pass is locked.
-An identity without a passphrase needs no agent. Nothing else uses the agent:
-the TUI and commands still ask for the passphrase themselves.
+An identity without a passphrase needs no agent. Commands decrypt through the
+agent too while it holds the identity, and ask for the passphrase only once it
+has locked; the TUI still asks for it itself. Anything running as you can ask
+the agent to decrypt while it is unlocked, as with `ssh-agent`: `lock` when done.
 
 `ezer-pass browserpass uninstall` undoes `install`. If browserpass's own host
 (`browserpass-native`) is installed, `install` refuses to replace it unless

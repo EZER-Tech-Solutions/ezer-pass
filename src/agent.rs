@@ -1,6 +1,7 @@
 //! The agent: a background copy of ezer-pass that keeps unlocked identities
 //! in memory, so a program with no terminal to ask a passphrase on (the
-//! browser extension's host, see `browserpass`) can still read the store.
+//! browser extension's host, see `browserpass`) can still read the store,
+//! and a command run while it holds the identity asks for no passphrase.
 //! `ezer-pass unlock` starts it and hands it the passphrase. It decrypts on
 //! request, so the keys never leave it, and forgets everything and exits
 //! after `idle_timeout()` seconds unused, or on `ezer-pass lock`. It listens
@@ -155,6 +156,17 @@ pub fn decrypt(identity: &Path, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>>
         Reply::Failed { message } => Err(anyhow!(message)),
         _ => bail!("unexpected answer from the agent"),
     }
+}
+
+/// Whether a running agent holds `identity` unlocked; asking counts as a use.
+pub fn holds(identity: &Path) -> bool {
+    let Some(stream) = connect() else {
+        return false;
+    };
+    let status = Request::Status {
+        identity: key_for(identity),
+    };
+    matches!(exchange(stream, &status), Ok(Reply::Done))
 }
 
 /// `ezer-pass unlock`: start the agent if it isn't running, and unlock

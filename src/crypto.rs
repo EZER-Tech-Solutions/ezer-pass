@@ -9,9 +9,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use zeroize::Zeroizing;
+
+use crate::agent;
 
 /// The passphrase didn't open the identity.
 #[derive(Debug)]
@@ -25,9 +27,11 @@ impl std::fmt::Display for WrongPassphrase {
 
 impl std::error::Error for WrongPassphrase {}
 
-/// The unlocked identity, held for the rest of the session.
+/// The unlocked identity, held for the rest of the session: in this process,
+/// or in the agent, which decrypts for it and never hands the identity over.
 pub struct Keys {
     identities: Vec<x25519::Identity>,
+    agent: Option<PathBuf>,
 }
 
 impl Keys {
@@ -36,10 +40,24 @@ impl Keys {
     pub fn generate() -> Self {
         Keys {
             identities: vec![x25519::Identity::generate()],
+            agent: None,
         }
     }
 
-    /// The public keys that go with the identity.
+    /// The identity at `identity` as the agent holds it unlocked.
+    pub fn in_agent(identity: PathBuf) -> Self {
+        Keys {
+            identities: Vec::new(),
+            agent: Some(identity),
+        }
+    }
+
+    /// Whether the agent holds these, so they have no public keys to give.
+    pub fn is_in_agent(&self) -> bool {
+        self.agent.is_some()
+    }
+
+    /// The public keys that go with the identity; none for the agent's.
     pub fn recipients(&self) -> Vec<x25519::Recipient> {
         self.identities.iter().map(|i| i.to_public()).collect()
     }
@@ -100,7 +118,10 @@ pub fn unlock(path: &Path, passphrase: Option<&SecretString>) -> Result<Keys> {
     if identities.is_empty() {
         bail!("{} holds no keys", path.display());
     }
-    Ok(Keys { identities })
+    Ok(Keys {
+        identities,
+        agent: None,
+    })
 }
 
 /// Make a new identity at `path` under `passphrase`, returning its public
@@ -163,6 +184,9 @@ pub fn encrypt(recipients: &[x25519::Recipient], plaintext: &[u8]) -> Result<Vec
 }
 
 pub fn decrypt(keys: &Keys, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    if let Some(identity) = &keys.agent {
+        return agent::decrypt(identity, ciphertext);
+    }
     let identities = keys.identities.iter().map(|i| i as &dyn age::Identity);
     decrypt_any(identities, ciphertext).map_err(|e| match e.downcast_ref() {
         Some(age::DecryptError::NoMatchingKeys) => anyhow!("not encrypted to your identity"),
@@ -228,6 +252,7 @@ mod tests {
     fn roundtrip() {
         let keys = Keys {
             identities: vec![x25519::Identity::generate()],
+            agent: None,
         };
         let ciphertext = encrypt(&keys.recipients(), b"hunter2\nuser: me\n").unwrap();
         assert_eq!(
@@ -236,6 +261,7 @@ mod tests {
         );
         let other = Keys {
             identities: vec![x25519::Identity::generate()],
+            agent: None,
         };
         let err = decrypt(&other, &ciphertext).unwrap_err().to_string();
         assert_eq!(err, "not encrypted to your identity");

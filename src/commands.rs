@@ -3,6 +3,7 @@ use crate::crypto::{self, Keys};
 use crate::password::{self, Kind, Spec};
 use crate::store::{self, EXT};
 use crate::{agent, clipboard, fileio, git, index, setup};
+use age::x25519::Recipient;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::io::{BufRead, Read, Write};
@@ -63,20 +64,43 @@ impl Session {
         Ok(())
     }
 
-    /// Unlock the identity if it isn't yet, asking for its passphrase on
-    /// the terminal.
+    /// Unlock the identity if it isn't yet: through the agent when it holds
+    /// it (`ezer-pass unlock`), otherwise asking for its passphrase on the
+    /// terminal.
     pub fn unlock(&mut self) -> Result<&Keys> {
         if self.keys.is_none() {
-            self.keys = Some(setup::unlock_on_terminal(&self.context.identity()?)?);
+            let identity = self.context.identity()?;
+            self.keys = Some(if agent::holds(&identity) {
+                Keys::in_agent(identity)
+            } else {
+                setup::unlock_on_terminal(&identity)?
+            });
         }
         Ok(self.keys.as_ref().expect("just unlocked"))
     }
 
-    /// Decrypt an entry, unlocking first if needed.
+    /// The identity's public keys, which the agent never gives: unlocked on
+    /// the terminal when only the agent holds it.
+    pub fn own_recipients(&mut self) -> Result<Vec<Recipient>> {
+        if self.keys.as_ref().is_some_and(Keys::is_in_agent) {
+            self.keys = Some(setup::unlock_on_terminal(&self.context.identity()?)?);
+        }
+        Ok(self.unlock()?.recipients())
+    }
+
+    /// Decrypt an entry, unlocking first if needed; an agent that locked
+    /// since (its idle timeout) gives way to the terminal.
     pub fn read(&mut self, path: &str) -> Result<Zeroizing<String>> {
         self.unlock()?;
         let keys = self.keys.as_ref().expect("unlocked");
-        self.store.read_entry(path, keys)
+        match self.store.read_entry(path, keys) {
+            Err(e) if keys.is_in_agent() && e.is::<agent::Locked>() => {
+                self.keys = Some(setup::unlock_on_terminal(&self.context.identity()?)?);
+                self.store
+                    .read_entry(path, self.keys.as_ref().expect("just unlocked"))
+            }
+            read => read,
+        }
     }
 
     /// Encrypt and write an entry, then commit it.

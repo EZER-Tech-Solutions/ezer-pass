@@ -259,6 +259,8 @@ in `~/.config/ezer-pass/identity.age`, encrypted with your passphrase.
   is kept in memory only. While the agent holds it (`ezer-pass unlock`, below),
   commands ask nothing: `show`, `export` and the rest decrypt through it, so a
   script or a tool that runs ezer-pass with no terminal can read the store. A
+  one-shot command that asks for the passphrase hands it to the agent too, so
+  a script's next `show` asks nothing until the agent locks. A
   command that needs your public key (`init`, `migrate`) still asks. A plain, unencrypted identity file (as made by
   `age-keygen`) also works and is never asked about.
 - Back the identity up: without it and its passphrase nothing in the store can
@@ -414,7 +416,8 @@ exits after 15 minutes unused (`EZER_PASS_AGENT_TIMEOUT`), or on
 `ezer-pass lock`. Until then, the extension reports that ezer-pass is locked.
 An identity without a passphrase needs no agent. Commands decrypt through the
 agent too while it holds the identity, and ask for the passphrase only once it
-has locked; the TUI still asks for it itself. Anything running as you can ask
+has locked, then unlock the agent with it, as `unlock` would; the TUI still asks
+for it itself and keeps it to its session. Anything running as you can ask
 the agent to decrypt while it is unlocked, as with `ssh-agent`: `lock` when done.
 
 `ezer-pass browserpass uninstall` undoes `install`. If browserpass's own host
@@ -457,8 +460,8 @@ the passwords passing through its output, and so its transcript:
   removing fails instead of quietly doing nothing; pass `-f` to go ahead.
 
 Decrypting needs the identity: `ezer-pass unlock` in your own terminal first,
-so the agent decrypts for these commands (or an identity without a
-passphrase). This keeps passwords out of the agent's sight by default, but it
+or any one-shot command that asks you for the passphrase, so the agent
+decrypts for these commands (or an identity without a passphrase). This keeps passwords out of the agent's sight by default, but it
 is no wall: anything running as you can `show` an entry while the agent holds
 the identity. `lock` when done, or give the project its own context holding
 only the entries it needs.

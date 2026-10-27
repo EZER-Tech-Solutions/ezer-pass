@@ -73,10 +73,20 @@ impl Session {
             self.keys = Some(if agent::holds(&identity) {
                 Keys::in_agent(identity)
             } else {
-                setup::unlock_on_terminal(&identity)?
+                self.ask(&identity)?
             });
         }
         Ok(self.keys.as_ref().expect("just unlocked"))
+    }
+
+    /// The passphrase on the terminal: kept in this session when it is the
+    /// TUI's or the explorer's, handed to the agent for a one-shot command.
+    fn ask(&self, identity: &Path) -> Result<Keys> {
+        if self.interactive {
+            setup::unlock_on_terminal(identity)
+        } else {
+            setup::unlock_into_agent(identity)
+        }
     }
 
     /// The identity's public keys, which the agent never gives: unlocked on
@@ -95,7 +105,7 @@ impl Session {
         let keys = self.keys.as_ref().expect("unlocked");
         match self.store.read_entry(path, keys) {
             Err(e) if keys.is_in_agent() && e.is::<agent::Locked>() => {
-                self.keys = Some(setup::unlock_on_terminal(&self.context.identity()?)?);
+                self.keys = Some(self.ask(&self.context.identity()?)?);
                 self.store
                     .read_entry(path, self.keys.as_ref().expect("just unlocked"))
             }

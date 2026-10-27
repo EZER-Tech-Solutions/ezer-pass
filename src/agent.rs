@@ -189,26 +189,35 @@ pub fn unlock(identity: &Path) -> Result<()> {
             return Ok(());
         }
     }
-    setup::ask_passphrase(identity, |passphrase| {
-        let request = Request::Unlock {
-            identity: key.clone(),
-            passphrase: Zeroizing::new(passphrase.expose_secret().to_owned()),
-        };
-        match exchange(start()?, &request)? {
-            Reply::Done => Ok(()),
-            Reply::WrongPassphrase => Err(anyhow!(WrongPassphrase)),
-            Reply::Failed { message } => Err(anyhow!(message)),
-            _ => bail!("unexpected answer from the agent"),
-        }
-    })?;
+    setup::ask_passphrase(identity, |passphrase| keep(identity, passphrase))?;
+    println!("{}", unlocked());
+    Ok(())
+}
+
+/// Unlock `identity` in the agent with `passphrase`, starting the agent if
+/// it isn't running.
+pub fn keep(identity: &Path, passphrase: &SecretString) -> Result<()> {
+    let request = Request::Unlock {
+        identity: key_for(identity),
+        passphrase: Zeroizing::new(passphrase.expose_secret().to_owned()),
+    };
+    match exchange(start()?, &request)? {
+        Reply::Done => Ok(()),
+        Reply::WrongPassphrase => Err(anyhow!(WrongPassphrase)),
+        Reply::Failed { message } => Err(anyhow!(message)),
+        _ => bail!("unexpected answer from the agent"),
+    }
+}
+
+/// What to say once the agent holds an identity: until when.
+pub fn unlocked() -> String {
     match idle_timeout() {
-        0 => println!("unlocked until `ezer-pass lock`"),
-        secs => println!(
+        0 => "unlocked until `ezer-pass lock`".into(),
+        secs => format!(
             "unlocked; it locks again after {} unused (or on `ezer-pass lock`)",
             minutes(secs)
         ),
     }
-    Ok(())
 }
 
 fn minutes(secs: u64) -> String {

@@ -5,8 +5,8 @@
 use crate::commands::Session;
 use crate::context::tilde;
 use crate::crypto::{self, Keys, WrongPassphrase};
-use crate::git;
 use crate::store::{self, RECIPIENTS};
+use crate::{agent, git};
 use age::secrecy::SecretString;
 use age::x25519::Recipient;
 use anyhow::{Context, Result, bail};
@@ -23,6 +23,23 @@ pub fn unlock_on_terminal(path: &Path) -> Result<Keys> {
         return crypto::unlock(path, None);
     }
     ask_passphrase(path, |passphrase| crypto::unlock(path, Some(passphrase)))
+}
+
+/// `unlock_on_terminal` for a one-shot command: the passphrase also goes to
+/// the agent, so the commands after it (a script's next `show`) ask for
+/// nothing until it idles out. Unlocked here alone if the agent can't start.
+pub fn unlock_into_agent(path: &Path) -> Result<Keys> {
+    if !crypto::needs_passphrase(path)? {
+        return crypto::unlock(path, None);
+    }
+    ask_passphrase(path, |passphrase| match agent::keep(path, passphrase) {
+        Ok(()) => {
+            eprintln!("ezer-pass: {}", agent::unlocked());
+            Ok(Keys::in_agent(path.to_path_buf()))
+        }
+        Err(e) if e.is::<WrongPassphrase>() => Err(e),
+        Err(_) => crypto::unlock(path, Some(passphrase)),
+    })
 }
 
 /// Ask for the passphrase of the identity at `path` on the terminal and

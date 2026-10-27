@@ -301,7 +301,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         "generate" => {
             expect_args(
                 &positional,
-                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [--login=NAME] [-c] [-f] [-i] [entry] [length]",
+                "generate [-n|--url-safe|--digits|--hex|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [--login=NAME] [-c] [-q] [-f] [-i] [entry] [length]",
                 0,
                 2,
             )?;
@@ -798,6 +798,8 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
                     | "--force"
                     | "-i"
                     | "--in-place"
+                    | "-q"
+                    | "--quiet"
                     | "--no-ambiguous"
                     | "--capitalize"
             )
@@ -857,6 +859,9 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
         if login.is_some() {
             bail!("--login needs an entry");
         }
+        if has(&["-q", "--quiet"]) {
+            bail!("-q needs an entry to save the password in");
+        }
         let password = spec.generate(length)?;
         if has(&["-c", "--clip"]) {
             clipboard::copy(&password)?;
@@ -896,6 +901,8 @@ fn cmd_generate(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Resu
             store::display(&path).green(),
             clipboard::clear_after()
         );
+    } else if has(&["-q", "--quiet"]) {
+        println!("generated {}", store::display(&path).green());
     } else {
         println!(
             "the generated password for {} is:\n{}",
@@ -1736,8 +1743,8 @@ fn print_help() {
         "add an entry (-m several lines, -e echo)",
     );
     entry(
-        "generate [-c] [-i] [-f] [entry] [len]",
-        "generate a password (-c copy it, -i replace only the first line; no entry: not saved)",
+        "generate [-c] [-q] [-i] [-f] [entry] [len]",
+        "generate a password (-c copy it, -q save it unseen, -i replace only the first line; no entry: not saved)",
     );
     entry(
         "  -n | --url-safe | --digits | --hex",

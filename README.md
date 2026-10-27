@@ -149,7 +149,7 @@ hunter2
 | `mkdir <path>` | create a directory (git tracks it once it holds an entry) |
 | `show [-c] <entry>` | print an entry, or `-c` to copy its first line (cleared after 45 s) |
 | `insert [-m] [-e] [-f] <entry>` | add an entry: asks twice without echo; `-m` several lines, `-e` echo |
-| `generate [-n\|--url-safe\|--digits\|--hex\|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [--login=NAME] [-c] [-i] [-f] [entry] [len]` | generate a password; `-c` copies instead of printing, `-i` replaces only the first line. `--login` adds a `login:` line under it (with `-i`, updates the entry's login, username or user line). Without an entry (or with only a length) it is printed or copied but not saved. Symbols by default; `-n` letters and digits, `--url-safe` adds only `-_` (for database URLs and `.env` files), `--digits` for PINs, `--hex` for tokens, `--passphrase` for words from the EFF large list joined by `-` (its length counts words, default 7, about 90 bits); `--separator=X` joins them with X instead (`--separator=` for nothing), and `--capitalize` capitalizes each and ends it with a digit, for sites that demand both. It always holds a capital, a small letter, a digit (and a symbol, for the default) when long enough. `--no-ambiguous` leaves out `0O1lI\|`, `--exclude` any characters a site refuses |
+| `generate [-n\|--url-safe\|--digits\|--hex\|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [--login=NAME] [-c] [-q] [-i] [-f] [entry] [len]` | generate a password; `-c` copies instead of printing, `-q` saves it without showing it (for scripts and coding agents, which then pass it on with `run`), `-i` replaces only the first line. `--login` adds a `login:` line under it (with `-i`, updates the entry's login, username or user line). Without an entry (or with only a length) it is printed or copied but not saved. Symbols by default; `-n` letters and digits, `--url-safe` adds only `-_` (for database URLs and `.env` files), `--digits` for PINs, `--hex` for tokens, `--passphrase` for words from the EFF large list joined by `-` (its length counts words, default 7, about 90 bits); `--separator=X` joins them with X instead (`--separator=` for nothing), and `--capitalize` capitalizes each and ends it with a digit, for sites that demand both. It always holds a capital, a small letter, a digit (and a symbol, for the default) when long enough. `--no-ambiguous` leaves out `0O1lI\|`, `--exclude` any characters a site refuses |
 | `edit <entry>` | edit in `$VISUAL` / `$EDITOR`, via a private file in `/dev/shm` that is wiped afterwards |
 | `rm [-r] [-f] <path>` | remove an entry or directory |
 | `mv [-f] <src> <dest>` / `cp [-f] <src> <dest>` | rename or copy, re-encrypting for the new folder's recipients if they differ. Either side can be in another context: `mv work:/servers/web1 /servers/` |
@@ -451,6 +451,8 @@ the passwords passing through its output, and so its transcript:
   ezer-pass run -- cargo test
   ```
 
+- `ezer-pass generate -q servers/db/new` saves a new password without
+  showing it; `run` then hands it on.
 - With no terminal to ask on, a command that would ask before overwriting or
   removing fails instead of quietly doing nothing; pass `-f` to go ahead.
 

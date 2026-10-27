@@ -158,6 +158,7 @@ hunter2
 | `import [--force] <file> <entry>` | store a file as a base64 entry |
 | `export [-f] <entry> [dest]` | write a file entry back to disk |
 | `reindex [path]` | find file entries the index doesn't know about (older stores) |
+| `run [-e VAR=entry]... [--env-file FILE] [--] <cmd> [args]` | run a command with entries' passwords in its environment; one-shot only, see [Scripts and coding agents](#scripts-and-coding-agents) |
 | `init [-p folder] [age1...]` | make your identity if needed; set who a folder is encrypted to |
 | `migrate` | move a `pass` store from gpg to age, once |
 | `git <git-args>` | run git in the store (`git init`, `git log`, `git remote add`, ...) |
@@ -420,6 +421,45 @@ the agent to decrypt while it is unlocked, as with `ssh-agent`: `lock` when done
 (`browserpass-native`) is installed, `install` refuses to replace it unless
 given `--force`, and says so if it is installed for every user, as a browser
 may run that one instead.
+
+## Scripts and coding agents
+
+A script or a coding agent (Claude Code, Codex, ...) can use the store without
+the passwords passing through its output, and so its transcript:
+
+- `ezer-pass ls -r` prints every folder and entry as a full path, one a line.
+  It reads only names, so it decrypts nothing and needs no passphrase.
+- `ezer-pass run` starts a command with passwords (each entry's first line) in
+  its environment. The command replaces ezer-pass, so its exit code and
+  output are the command's own:
+
+  ```
+  ezer-pass run -e DATABASE_URL=servers/db/prod -e STRIPE_KEY=stripe/test -- cargo test
+  ```
+
+  Or list the variables in `.ezer-env` in the project, which holds entry
+  names, not secrets, so it can be committed; `run` reads it from the
+  directory it is run in (or `--env-file FILE`), and `-e` overrides it:
+
+  ```
+  # .ezer-env
+  DATABASE_URL=servers/db/prod
+  STRIPE_KEY=stripe/test
+  ```
+
+  ```
+  ezer-pass run -- cargo test
+  ```
+
+- With no terminal to ask on, a command that would ask before overwriting or
+  removing fails instead of quietly doing nothing; pass `-f` to go ahead.
+
+Decrypting needs the identity: `ezer-pass unlock` in your own terminal first,
+so the agent decrypts for these commands (or an identity without a
+passphrase). This keeps passwords out of the agent's sight by default, but it
+is no wall: anything running as you can `show` an entry while the agent holds
+the identity. `lock` when done, or give the project its own context holding
+only the entries it needs.
 
 ## Environment
 

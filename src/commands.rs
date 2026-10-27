@@ -377,6 +377,7 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             expect_args(&positional, "lock", 0, 0)?;
             agent::lock()?
         }
+        "run" => cmd_run(sess, args)?,
         "browserpass" => bail!("run `ezer-pass browserpass` on its own, not in a session"),
         "help" | "?" => print_help(),
         "exit" | "quit" if sess.interactive => return Ok(Outcome::Exit),
@@ -387,6 +388,105 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
         _ => bail!("unknown command {cmd:?} (try `help`)"),
     }
     Ok(Outcome::Continue)
+}
+
+const RUN_USAGE: &str = "run [-e VAR=entry]... [--env-file FILE] [--] <command> [args]";
+
+/// The file `run` reads its `VAR=entry` lines from when given no
+/// `--env-file`, in the directory it is run in.
+const ENV_FILE: &str = ".ezer-env";
+
+/// `run`: start a command with entries' passwords (their first lines) in
+/// its environment, so a script or a coding agent can use them without
+/// ever printing them. The command replaces ezer-pass, keeping its exit
+/// code and signals.
+fn cmd_run(sess: &mut Session, args: &[String]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    if sess.interactive {
+        bail!("run `ezer-pass run` on its own, not in a session");
+    }
+    // Options end at `--` or the command; the command's own are its own.
+    let mut vars = Vec::new();
+    let mut env_file = None;
+    let mut rest = args.iter();
+    let command = loop {
+        let Some(arg) = rest.next() else {
+            bail!("usage: {RUN_USAGE}");
+        };
+        match arg.as_str() {
+            "-e" | "--env" => {
+                let var = rest
+                    .next()
+                    .with_context(|| format!("{arg} needs VAR=entry"))?;
+                vars.push(env_line(var)?);
+            }
+            "--env-file" => {
+                env_file = Some(rest.next().context("--env-file needs a file")?.clone());
+            }
+            "--" => break rest.next().with_context(|| format!("usage: {RUN_USAGE}"))?,
+            a if a.starts_with("--env=") => vars.push(env_line(&a["--env=".len()..])?),
+            a if a.starts_with("--env-file=") => {
+                env_file = Some(a["--env-file=".len()..].to_string());
+            }
+            a if a.starts_with('-') => bail!("unknown option {a} (usage: {RUN_USAGE})"),
+            _ => break arg,
+        }
+    };
+    // The file's lines first, so -e overrides them.
+    let file = match &env_file {
+        Some(file) => {
+            Some(std::fs::read_to_string(file).with_context(|| format!("cannot read {file}"))?)
+        }
+        None => std::fs::read_to_string(ENV_FILE).ok(),
+    };
+    if let Some(file) = &file {
+        let name = env_file.as_deref().unwrap_or(ENV_FILE);
+        let mut from_file = Vec::new();
+        for (n, line) in file.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            from_file.push(env_line(line).with_context(|| format!("{name}, line {}", n + 1))?);
+        }
+        vars.splice(0..0, from_file);
+    }
+    if vars.is_empty() {
+        bail!("no variables to set: pass -e VAR=entry, or list them in {ENV_FILE}");
+    }
+    let mut cmd = std::process::Command::new(command);
+    cmd.args(rest);
+    for (var, entry) in vars {
+        let path = sess.resolve_entry(&entry)?;
+        let content = sess.read(&path)?;
+        if fileio::marker_filename(&content).is_some() {
+            bail!("{} is a file entry, not a password", store::display(&path));
+        }
+        cmd.env(var, content.lines().next().unwrap_or(""));
+    }
+    let e = cmd.exec();
+    Err(anyhow::Error::new(e).context(format!("cannot run {command}")))
+}
+
+/// Split `VAR=entry`, checking `VAR` is a usable variable name.
+fn env_line(line: &str) -> Result<(String, String)> {
+    let (var, entry) = line
+        .split_once('=')
+        .with_context(|| format!("{line:?} is not VAR=entry"))?;
+    let (var, entry) = (var.trim(), entry.trim());
+    let mut chars = var.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+    if !valid {
+        bail!("{var:?} is not a variable name");
+    }
+    if entry.is_empty() {
+        bail!("{var} has no entry");
+    }
+    Ok((var.into(), entry.into()))
 }
 
 const CONTEXT_USAGE: &str = "context [list | use <name> | add <name> [path] | rm <name> | rename <old> <new> | move <name> <path>]";
@@ -1680,6 +1780,16 @@ fn print_help() {
         "find file entries made before ezer-pass tracked them",
     );
     println!();
+    section("scripts and coding agents (from your shell)");
+    entry(
+        "run [-e VAR=entry]... -- <cmd>",
+        "run cmd with passwords in its environment, never printed",
+    );
+    entry(
+        "  --env-file FILE",
+        "VAR=entry lines to set (default ./.ezer-env)",
+    );
+    println!();
     section("keys and setup (age)");
     entry(
         "init [-p folder] [age1...]",
@@ -1734,7 +1844,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, with_password};
+    use super::{env_line, tokenize, with_password};
 
     #[test]
     fn a_login_goes_under_the_password() {
@@ -1774,5 +1884,20 @@ mod tests {
         assert_eq!(tokenize("cd my\\ dir").unwrap(), ["cd", "my dir"]);
         assert_eq!(tokenize("echo \"a\\\"b\"").unwrap(), ["echo", "a\"b"]);
         assert!(tokenize("cd 'unterminated").is_err());
+    }
+
+    #[test]
+    fn env_lines() {
+        let line = |s| env_line(s).ok();
+        assert_eq!(
+            line("DB_URL = servers/db/prod"),
+            Some(("DB_URL".into(), "servers/db/prod".into()))
+        );
+        assert_eq!(line("_K=a=b"), Some(("_K".into(), "a=b".into())));
+        assert_eq!(line("1X=a"), None);
+        assert_eq!(line("A-B=a"), None);
+        assert_eq!(line("=a"), None);
+        assert_eq!(line("X="), None);
+        assert_eq!(line("servers/db"), None);
     }
 }

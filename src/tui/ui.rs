@@ -3,6 +3,7 @@ use super::generate::{Field, Form};
 use super::history;
 use super::palette;
 use super::preview::{Body, Preview};
+use super::settings::{Row as SettingRow, Settings};
 use super::sync::{Op, Sync};
 use super::theme::{THEMES, theme};
 use crate::password::{Kind, LOOK_ALIKES, SEPARATORS, separator_name};
@@ -69,6 +70,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             | Mode::Insert(_)
             | Mode::Contexts(_)
             | Mode::Themes { .. }
+            | Mode::Settings(_)
     ) {
         // Push everything behind a popup into the background.
         let area = f.area();
@@ -84,16 +86,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_palette(f, footer, &palette, app.palette_sel);
         }
         Mode::Sync(sync) => draw_sync(f, app, sync),
-        Mode::Unlock(u) => draw_unlock(f, u),
+        Mode::Unlock(u) => draw_unlock(f, u, &app.settings),
         Mode::Insert(ins) => draw_insert(f, ins),
         Mode::Contexts(picker) => draw_contexts(f, app, picker),
         Mode::Themes { list, .. } => draw_themes(f, list.selected()),
+        Mode::Settings(list) => draw_settings(f, &app.settings, list.selected()),
         _ => {}
     }
 }
 
 /// The passphrase popup: one masked field, then the held action runs.
-fn draw_unlock(f: &mut Frame, u: &Unlock) {
+fn draw_unlock(f: &mut Frame, u: &Unlock, settings: &Settings) {
     let len = u.input.text.chars().count();
     let status = match (&u.error, u.working) {
         (_, true) => Line::from("unlocking…".fg(theme().unlock)),
@@ -101,7 +104,16 @@ fn draw_unlock(f: &mut Frame, u: &Unlock) {
             "✗ ".fg(theme().danger).bold(),
             e.clone().fg(theme().danger),
         ]),
-        (None, _) => "once per session; kept in memory only".dim().into(),
+        // Say where the passphrase goes before it is typed.
+        (None, _) if settings.unlock_agent => "also unlocks the agent (scripts, the browser)"
+            .fg(theme().mark)
+            .into(),
+        (None, _) => match settings.lock_after {
+            0 => "for this session only, until you quit".dim().into(),
+            m => format!("for this session only; locks after {m} min idle")
+                .dim()
+                .into(),
+        },
     };
     let width = 56.min(f.area().width);
     let (prompt, col) = input_line("passphrase: ", len, len, '\u{f023}', width);
@@ -1531,6 +1543,7 @@ fn draw_help(f: &mut Frame) {
             &[
                 (":", "commands (type to narrow them)"),
                 ("C", "switch context (work, personal…)"),
+                ("S", "settings: idle lock, the agent, theme"),
                 (":theme", "change the colors"),
                 ("R", "refresh"),
                 ("q", "quit (offers to push)"),
@@ -1933,6 +1946,82 @@ fn draw_themes(f: &mut Frame, selected: Option<usize>) {
     let area = popup_fixed(f.area(), 50, lines.len() as u16 + 4);
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The `S` popup: each setting and its value, and what the highlighted one
+/// does.
+fn draw_settings(f: &mut Frame, settings: &Settings, selected: Option<usize>) {
+    let width = 64.min(f.area().width);
+    let mut lines: Vec<Line> = SettingRow::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let highlighted = selected == Some(i);
+            let label = format!(" {:<22}", row.label());
+            let value = format!("‹ {} ›", row.value(settings));
+            Line::from(if highlighted {
+                vec![
+                    BAR.fg(theme().accent),
+                    label.fg(theme().accent).bold(),
+                    value.fg(theme().accent),
+                ]
+            } else {
+                vec![" ".into(), label.bold(), value.into()]
+            })
+        })
+        .collect();
+    lines.push("".into());
+    let row = SettingRow::ALL[selected.unwrap_or(0).min(SettingRow::ALL.len() - 1)];
+    // Borders and padding take 5 columns.
+    let wrap = (width as usize).saturating_sub(5).max(20);
+    lines.extend(
+        wrap_words(row.help(settings), wrap)
+            .into_iter()
+            .map(|l| l.dim().into()),
+    );
+    let mut keys = hint(&[("←→", "change"), ("esc", "close")]);
+    keys.spans.insert(0, " ".into());
+    keys.spans.push(" ".into());
+    let block = popup(Line::from(" settings ").bold(), theme().accent)
+        .title_bottom(keys.right_aligned())
+        .padding(Padding::new(1, 2, 1, 1));
+    // The tallest help, so the popup keeps its size as you move.
+    let help_lines = SettingRow::ALL
+        .iter()
+        .flat_map(|r| {
+            [false, true].map(|on| {
+                let s = Settings {
+                    unlock_agent: on,
+                    ..*settings
+                };
+                wrap_words(r.help(&s), wrap).len()
+            })
+        })
+        .max()
+        .unwrap_or(0);
+    let height = (SettingRow::ALL.len() + 1 + help_lines) as u16 + 4;
+    let area = popup_fixed(f.area(), width, height);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// `text` broken at spaces into lines of at most `width` characters.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// The `C` popup: every context with its store, the current one marked;

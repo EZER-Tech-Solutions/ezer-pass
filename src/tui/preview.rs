@@ -3,7 +3,7 @@
 
 use super::history::INDEX_SUBJECT;
 use crate::commands::Session;
-use crate::{fileio, git, store};
+use crate::{agent, fileio, git, store};
 use std::time::SystemTime;
 use zeroize::Zeroizing;
 
@@ -42,6 +42,9 @@ pub struct Preview {
     pub body: Body,
     /// Commits that touched the row, as (commit time, subject).
     pub history: Vec<(u64, String)>,
+    /// The agent the session decrypts through has locked: the entry
+    /// couldn't be read.
+    pub agent_locked: bool,
 }
 
 impl Preview {
@@ -63,6 +66,7 @@ impl Preview {
             return old;
         }
         let root = sess.store.root();
+        let mut agent_locked = false;
         let (body, pathspec) = if is_dir {
             (
                 Body::Folder(recipients(sess, path)),
@@ -73,14 +77,24 @@ impl Preview {
                 },
             )
         } else {
-            (entry(sess, path), format!("{path}{}", store::EXT))
+            let body = entry(sess, path);
+            agent_locked = body.is_err();
+            (
+                body.unwrap_or(Body::Entry(None)),
+                format!("{path}{}", store::EXT),
+            )
         };
         let history = git::path_log(root, &pathspec, !is_dir, HISTORY)
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, subject)| subject != INDEX_SUBJECT)
             .collect();
-        Preview { key, body, history }
+        Preview {
+            key,
+            body,
+            history,
+            agent_locked,
+        }
     }
 
     pub fn path(&self) -> &str {
@@ -108,20 +122,22 @@ fn recipients(sess: &Session, dir: &str) -> Result<(String, Vec<Recipient>), Str
     Ok((from, list))
 }
 
-fn entry(sess: &Session, path: &str) -> Body {
+/// The entry's body; `Err` when the agent decrypting it has locked.
+fn entry(sess: &Session, path: &str) -> Result<Body, agent::Locked> {
     if sess.files.is_file(path) {
-        return Body::File;
+        return Ok(Body::File);
     }
     let Some(keys) = &sess.keys else {
-        return Body::Entry(None);
+        return Ok(Body::Entry(None));
     };
-    match sess.store.read_entry(path, keys) {
+    Ok(match sess.store.read_entry(path, keys) {
         // Not in the index yet, but a file entry all the same.
         Ok(content) if fileio::marker_filename(&content).is_some() => Body::File,
         Ok(content) => {
             let rest = content.split_once('\n').map_or("", |(_, rest)| rest);
             Body::Entry(Some(Ok(Zeroizing::new(rest.to_string()))))
         }
+        Err(e) if e.is::<agent::Locked>() => return Err(agent::Locked),
         Err(e) => Body::Entry(Some(Err(format!("{e:#}")))),
-    }
+    })
 }

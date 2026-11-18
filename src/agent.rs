@@ -11,6 +11,7 @@ use crate::context::tilde;
 use crate::crypto::{self, Keys, WrongPassphrase};
 use crate::{git, setup};
 use age::secrecy::{ExposeSecret, SecretString};
+use age::x25519;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -23,6 +24,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -57,6 +59,11 @@ enum Request {
     Status {
         identity: PathBuf,
     },
+    /// The public keys that go with `identity`, if it is unlocked. They
+    /// are no secret; the identity itself never leaves the agent.
+    Recipients {
+        identity: PathBuf,
+    },
     /// `ciphertext` is base64.
     Decrypt {
         identity: PathBuf,
@@ -72,6 +79,10 @@ enum Reply {
     /// Base64.
     Plaintext {
         data: Zeroizing<String>,
+    },
+    /// Public keys (`age1...`).
+    Recipients {
+        keys: Vec<String>,
     },
     Locked,
     WrongPassphrase,
@@ -167,6 +178,24 @@ pub fn holds(identity: &Path) -> bool {
         identity: key_for(identity),
     };
     matches!(exchange(stream, &status), Ok(Reply::Done))
+}
+
+/// The public keys of the agent's copy of `identity`; none if it isn't
+/// unlocked there, or the agent is an older one that doesn't say.
+pub fn recipients(identity: &Path) -> Vec<x25519::Recipient> {
+    let Some(stream) = connect() else {
+        return Vec::new();
+    };
+    let request = Request::Recipients {
+        identity: key_for(identity),
+    };
+    match exchange(stream, &request) {
+        Ok(Reply::Recipients { keys }) => keys
+            .iter()
+            .filter_map(|k| x25519::Recipient::from_str(k).ok())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// `ezer-pass unlock`: start the agent if it isn't running, and unlock
@@ -276,10 +305,8 @@ struct State {
 /// Run as the agent until locked or unused for `idle_timeout()`. An error
 /// means it never started listening.
 pub fn serve() -> Result<()> {
-    // Keep the keys out of core dumps, and other processes from reading
-    // them with ptrace.
-    // SAFETY: prctl with PR_SET_DUMPABLE takes no pointers.
-    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) };
+    // main has already kept the keys out of core dumps and ptrace
+    // (`crypto::protect_memory`).
     let path = socket_path()?;
     if UnixStream::connect(&path).is_ok() {
         // Another agent is already serving.
@@ -352,6 +379,13 @@ fn answer(request: Request, state: &mut State) -> Reply {
                 Reply::Locked
             }
         }
+        // Not a use: it says nothing secret, and only follows an unlock.
+        Request::Recipients { identity } => match state.keys.get(&identity) {
+            Some(keys) => Reply::Recipients {
+                keys: keys.recipients().iter().map(|r| r.to_string()).collect(),
+            },
+            None => Reply::Locked,
+        },
         Request::Unlock {
             identity,
             passphrase,
@@ -450,6 +484,25 @@ mod tests {
                 assert_eq!(STANDARD.decode(data.as_bytes()).unwrap(), b"hunter2\n")
             }
             _ => panic!("expected plaintext"),
+        }
+    }
+
+    #[test]
+    fn gives_public_keys_only_once_unlocked() {
+        let keys = Keys::generate();
+        let public = keys.recipients()[0].to_string();
+        let mut state = State {
+            keys: HashMap::new(),
+            last_used: Instant::now(),
+        };
+        let request = || Request::Recipients {
+            identity: PathBuf::from("/id"),
+        };
+        assert!(matches!(answer(request(), &mut state), Reply::Locked));
+        state.keys.insert(PathBuf::from("/id"), keys);
+        match answer(request(), &mut state) {
+            Reply::Recipients { keys } => assert_eq!(keys, vec![public]),
+            _ => panic!("expected public keys"),
         }
     }
 }

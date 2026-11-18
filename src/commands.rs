@@ -89,8 +89,8 @@ impl Session {
         }
     }
 
-    /// The identity's public keys, which the agent never gives: unlocked on
-    /// the terminal when only the agent holds it.
+    /// The identity's public keys, read from the identity itself: unlocked
+    /// on the terminal when only the agent holds it.
     pub fn own_recipients(&mut self) -> Result<Vec<Recipient>> {
         if self.keys.as_ref().is_some_and(Keys::is_in_agent) {
             self.keys = Some(setup::unlock_on_terminal(&self.context.identity()?)?);

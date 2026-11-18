@@ -8,6 +8,7 @@ mod generate;
 mod history;
 mod palette;
 mod preview;
+mod settings;
 mod sync;
 mod theme;
 mod ui;
@@ -61,6 +62,8 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         {
             let effect = app.on_key(key);
             perform(terminal, app, effect)?;
+            // Time spent in $EDITOR or a prompt isn't idle.
+            app.last_key = std::time::Instant::now();
         }
     }
     Ok(())

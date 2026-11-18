@@ -92,6 +92,12 @@ pub const SPECS: &[Spec] = &[
         Arg::Context,
     ),
     spec("theme", "[name]", "change the colors", Arg::Theme),
+    spec(
+        "settings",
+        "",
+        "idle lock, unlocking the agent, theme",
+        Arg::None,
+    ),
     spec("pwd", "", "show the current folder", Arg::None),
     spec("help", "", "list the keys", Arg::None),
     spec("quit", "", "leave (offers to push)", Arg::None),
@@ -299,8 +305,10 @@ mod tests {
     fn every_spec_is_a_real_command() {
         for s in SPECS {
             assert!(
-                // theme is the TUI's own.
-                crate::commands::COMMANDS.contains(&s.name) || s.name == "theme",
+                // theme and settings are the TUI's own.
+                crate::commands::COMMANDS.contains(&s.name)
+                    || s.name == "theme"
+                    || s.name == "settings",
                 "{} is not a command",
                 s.name
             );

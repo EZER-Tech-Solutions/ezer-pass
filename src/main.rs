@@ -23,6 +23,9 @@ use std::process::ExitCode;
 
 /// The main entry point of the program.
 fn main() -> ExitCode {
+    // Before anything is unlocked or decrypted, in every mode (the agent's
+    // too).
+    crypto::protect_memory();
     // Read the command-line arguments:
     // - Skips the first arg (the program name)
     let mut args: Vec<String> = std::env::args().skip(1).collect();

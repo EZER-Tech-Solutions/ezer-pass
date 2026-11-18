@@ -107,6 +107,7 @@ marked or cut.
 | `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
 | `C` | switch context: pick another vault, or `n` to add one (see [Contexts](#contexts)) |
 | `:theme` | pick a color theme — default, catppuccin, dracula, gruvbox, nord, tokyo-night or light — drawn as you move; `⏎` keeps it, `Esc` goes back. `:theme nord` sets one directly. All but default use 24-bit color. Remembered in `$XDG_STATE_HOME/ezer-pass/theme` |
+| `S` | settings (also `:settings`): whether unlocking here unlocks the agent too, how long the TUI waits before locking when idle, and the theme. `←→` change one, saved at once to `$XDG_CONFIG_HOME/ezer-pass/settings` |
 | `Esc` | clear the filter, then marks, then the buffer |
 | `R` / `?` / `q` | refresh / help / quit |
 
@@ -119,7 +120,14 @@ marked or cut.
   `url:`, notes) is shown in the popup.
 - Recent entries persist in `$XDG_STATE_HOME/ezer-pass/recent` (names only).
 - The first time something needs decrypting, an unlock popup asks for your
-  identity's passphrase; after that the session stays unlocked until you quit.
+  identity's passphrase, unless the [agent](#browser) already holds it (then
+  the TUI decrypts through it). The unlock is the TUI's alone: it starts no
+  agent, so nothing else can decrypt with it, unless you turn on *unlock the
+  agent too* in `S`, so scripts and the browser can read the store while the
+  TUI is open (the popup says which it does before you type).
+- After 15 minutes without a key press the TUI locks: it forgets the identity
+  and closes a shown password, and the next decrypt asks again. `S` changes
+  how long, or turns it off. An agent you unlocked keeps its own timeout.
 - The TUI steps aside for `$EDITOR`, `insert` prompts and command output, then
   comes straight back; it all stays on the alternate screen, so a freshly
   generated password doesn't linger in shell scrollback.
@@ -270,7 +278,8 @@ in `~/.config/ezer-pass/identity.age`, encrypted with your passphrase.
   with others, and re-encrypts what is already there. Entries moved or copied
   into it are re-encrypted for them too.
 - The passphrase is asked once per TUI or explore session and the unlocked key
-  is kept in memory only. While the agent holds it (`ezer-pass unlock`, below),
+  is kept in memory only, in a process that other programs running as you
+  can't read with ptrace and that leaves no core dump (as is the agent). While the agent holds it (`ezer-pass unlock`, below),
   commands ask nothing: `show`, `export` and the rest decrypt through it, so a
   script or a tool that runs ezer-pass with no terminal can read the store. A
   one-shot command that asks for the passphrase hands it to the agent too, so
@@ -430,8 +439,9 @@ exits after 15 minutes unused (`EZER_PASS_AGENT_TIMEOUT`), or on
 `ezer-pass lock`. Until then, the extension reports that ezer-pass is locked.
 An identity without a passphrase needs no agent. Commands decrypt through the
 agent too while it holds the identity, and ask for the passphrase only once it
-has locked, then unlock the agent with it, as `unlock` would; the TUI still asks
-for it itself and keeps it to its session. Anything running as you can ask
+has locked, then unlock the agent with it, as `unlock` would; the TUI asks
+for it itself and keeps it to its session, unless *unlock the agent too* is on
+in its settings (`S`). Anything running as you can ask
 the agent to decrypt while it is unlocked, as with `ssh-agent`: `lock` when done.
 
 `ezer-pass browserpass uninstall` undoes `install`. If browserpass's own host

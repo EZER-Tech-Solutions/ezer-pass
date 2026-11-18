@@ -32,6 +32,9 @@ impl std::error::Error for WrongPassphrase {}
 pub struct Keys {
     identities: Vec<x25519::Identity>,
     agent: Option<PathBuf>,
+    /// The public keys the agent gave for its copy (none from an older
+    /// agent).
+    public: Vec<x25519::Recipient>,
 }
 
 impl Keys {
@@ -41,6 +44,7 @@ impl Keys {
         Keys {
             identities: vec![x25519::Identity::generate()],
             agent: None,
+            public: Vec::new(),
         }
     }
 
@@ -48,18 +52,29 @@ impl Keys {
     pub fn in_agent(identity: PathBuf) -> Self {
         Keys {
             identities: Vec::new(),
+            public: agent::recipients(&identity),
             agent: Some(identity),
         }
     }
 
-    /// Whether the agent holds these, so they have no public keys to give.
+    /// Whether the agent holds these, rather than this process.
     pub fn is_in_agent(&self) -> bool {
         self.agent.is_some()
     }
 
-    /// The public keys that go with the identity; none for the agent's.
+    /// The identity file the agent holds these as.
+    pub fn agent_identity(&self) -> Option<&Path> {
+        self.agent.as_deref()
+    }
+
+    /// The public keys that go with the identity: the agent's say, for its
+    /// copy.
     pub fn recipients(&self) -> Vec<x25519::Recipient> {
-        self.identities.iter().map(|i| i.to_public()).collect()
+        self.identities
+            .iter()
+            .map(|i| i.to_public())
+            .chain(self.public.iter().cloned())
+            .collect()
     }
 }
 
@@ -121,7 +136,16 @@ pub fn unlock(path: &Path, passphrase: Option<&SecretString>) -> Result<Keys> {
     Ok(Keys {
         identities,
         agent: None,
+        public: Vec::new(),
     })
+}
+
+/// Keep this process's memory (an unlocked identity, decrypted entries)
+/// out of core dumps, and other processes running as you from reading it
+/// with ptrace. Programs it runs start afresh, as exec resets this.
+pub fn protect_memory() {
+    // SAFETY: prctl with PR_SET_DUMPABLE takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) };
 }
 
 /// Make a new identity at `path` under `passphrase`, returning its public
@@ -250,19 +274,13 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let keys = Keys {
-            identities: vec![x25519::Identity::generate()],
-            agent: None,
-        };
+        let keys = Keys::generate();
         let ciphertext = encrypt(&keys.recipients(), b"hunter2\nuser: me\n").unwrap();
         assert_eq!(
             &decrypt(&keys, &ciphertext).unwrap()[..],
             b"hunter2\nuser: me\n"
         );
-        let other = Keys {
-            identities: vec![x25519::Identity::generate()],
-            agent: None,
-        };
+        let other = Keys::generate();
         let err = decrypt(&other, &ciphertext).unwrap_err().to_string();
         assert_eq!(err, "not encrypted to your identity");
     }

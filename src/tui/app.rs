@@ -3,13 +3,14 @@ use super::generate::{self, Field, Form};
 use super::history::{self, History};
 use super::palette;
 use super::preview::Preview;
+use super::settings::{self, Settings};
 use super::sync::{Op, Sync};
 use super::theme::{self, THEMES};
 use crate::commands::{self, COMMANDS, Session};
 use crate::context::{self, Context};
-use crate::crypto::{self, WrongPassphrase};
+use crate::crypto::{self, Keys, WrongPassphrase};
 use crate::password::Spec;
-use crate::{clipboard, fileio, git, index, store};
+use crate::{agent, clipboard, fileio, git, index, store};
 use age::secrecy::SecretString;
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -217,6 +218,9 @@ pub enum Mode {
         list: ListState,
         before: usize,
     },
+    /// The settings popup (`S`); changes apply and are saved as they are
+    /// made.
+    Settings(ListState),
 }
 
 pub struct Status {
@@ -260,6 +264,10 @@ pub struct App {
     pub show_context: bool,
     /// The highlighted row's details, on terminals wide enough to show them.
     pub preview: Option<Preview>,
+    pub settings: Settings,
+    /// The last key press (or the end of something run with the
+    /// terminal handed over, like $EDITOR), for locking when idle.
+    pub last_key: Instant,
 }
 
 impl App {
@@ -291,6 +299,8 @@ impl App {
             next: None,
             show_context: false,
             preview: None,
+            settings: Settings::load(),
+            last_key: Instant::now(),
         };
         app.count_contexts();
         app.refresh_git();
@@ -313,12 +323,16 @@ impl App {
             return;
         };
         let (path, is_dir) = (row.path.clone(), row.is_dir);
-        self.preview = Some(Preview::load(
-            self.preview.take(),
-            &self.sess,
-            &path,
-            is_dir,
-        ));
+        let preview = Preview::load(self.preview.take(), &self.sess, &path, is_dir);
+        if preview.agent_locked {
+            // The agent locked (its idle timeout) under us; show that,
+            // and ask for the passphrase at the next decrypt.
+            self.sess.keys = None;
+            self.info("the agent locked; the next entry you open asks for the passphrase");
+            self.preview = Some(Preview::load(None, &self.sess, &path, is_dir));
+        } else {
+            self.preview = Some(preview);
+        }
     }
 
     fn selected_path(&self) -> Option<String> {
@@ -520,8 +534,16 @@ impl App {
         });
     }
 
-    /// Re-mask a revealed password once the clipboard timeout has passed.
+    /// Re-mask a revealed password once the clipboard timeout has passed,
+    /// and lock once idle for the settings' `lock_after`.
     pub fn tick(&mut self) {
+        let idle = Duration::from_secs(self.settings.lock_after * 60);
+        if self.settings.lock_after > 0
+            && self.sess.keys.is_some()
+            && self.last_key.elapsed() >= idle
+        {
+            self.lock_idle();
+        }
         if let Mode::View(view) = &mut self.mode
             && view
                 .revealed_at
@@ -546,6 +568,37 @@ impl App {
                 }
                 Op::Push => self.after_push(None),
             }
+        }
+    }
+
+    /// Forget the identity, and anything decrypted on screen, after the
+    /// idle timeout. An agent holding the identity keeps it until its own
+    /// timeout (or `lock`), so the next decrypt goes through it again.
+    fn lock_idle(&mut self) {
+        let in_agent = self.sess.keys.as_ref().is_some_and(Keys::is_in_agent);
+        self.sess.keys = None;
+        self.preview = None;
+        if matches!(self.mode, Mode::View(_)) {
+            self.mode = Mode::Browse;
+        }
+        let minutes = match self.settings.lock_after {
+            1 => "1 minute".to_string(),
+            m => format!("{m} minutes"),
+        };
+        if in_agent {
+            self.info(format!(
+                "locked after {minutes} idle — the agent stays unlocked until `:lock` or its timeout"
+            ));
+        } else {
+            self.info(format!("locked after {minutes} idle"));
+        }
+    }
+
+    /// An agent that locked since it was last asked (a race with its idle
+    /// timeout): ask for the passphrase next time instead.
+    fn forget_locked_agent(&mut self, e: &anyhow::Error) {
+        if e.is::<agent::Locked>() && self.sess.keys.as_ref().is_some_and(Keys::is_in_agent) {
+            self.sess.keys = None;
         }
     }
 
@@ -734,7 +787,10 @@ impl App {
     pub fn finish_decrypt(&mut self, path: String, result: Result<String>) {
         let content = match result {
             Ok(content) => content,
-            Err(e) => return self.error(format!("{e:#}")),
+            Err(e) => {
+                self.forget_locked_agent(&e);
+                return self.error(format!("{e:#}"));
+            }
         };
         let secret = match fileio::decode_payload(&content) {
             Ok(file) => Secret::File {
@@ -770,7 +826,10 @@ impl App {
                 self.last_copy = Some((path.to_string(), Instant::now()));
                 self.info(format!("copied {} to clipboard", store::display(path)));
             }
-            Err(e) => self.error(format!("{e:#}")),
+            Err(e) => {
+                self.forget_locked_agent(&e);
+                self.error(format!("{e:#}"));
+            }
         }
     }
 
@@ -819,6 +878,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Effect {
+        self.last_key = Instant::now();
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match self.mode {
             Mode::Browse if ctrl && key.code == KeyCode::Char('c') => {
@@ -842,7 +902,52 @@ impl App {
             Mode::Insert(_) => self.insert_key(key),
             Mode::Contexts(_) => self.contexts_key(key),
             Mode::Themes { .. } => self.themes_key(key),
+            Mode::Settings(_) => self.settings_key(key),
         }
+    }
+
+    fn open_settings(&mut self) {
+        self.mode = Mode::Settings(ListState::default().with_selected(Some(0)));
+    }
+
+    /// ↑↓ (j k) between the settings, ←→ (h l, space) to change one; it is
+    /// saved at once.
+    fn settings_key(&mut self, key: KeyEvent) -> Effect {
+        let Mode::Settings(list) = &mut self.mode else {
+            return Effect::None;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let last = settings::Row::ALL.len() - 1;
+        let at = list.selected().unwrap_or(0);
+        let row = settings::Row::ALL[at.min(last)];
+        let back = match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                list.select(Some((at + 1).min(last)));
+                return Effect::None;
+            }
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                list.select(Some(at.saturating_sub(1)));
+                return Effect::None;
+            }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.mode = Mode::Browse;
+                return Effect::None;
+            }
+            KeyCode::Left | KeyCode::Char('h') => true,
+            KeyCode::Right | KeyCode::Char('l' | ' ') => false,
+            _ => return Effect::None,
+        };
+        row.cycle(&mut self.settings, back);
+        if row != settings::Row::Theme
+            && let Err(e) = self.settings.save()
+        {
+            self.error(format!("cannot save the settings: {e:#}"));
+        }
+        Effect::None
     }
 
     fn themes_key(&mut self, key: KeyEvent) -> Effect {
@@ -881,8 +986,19 @@ impl App {
     /// Let `effect` through if it needs no keys or they are unlocked;
     /// otherwise unlock first (a plain key file needs no passphrase) and
     /// hold it until the passphrase is in.
+    ///
+    /// An agent holding the identity (`ezer-pass unlock`) decrypts instead of
+    /// a passphrase; one that has locked since is asked about first.
     pub fn gate(&mut self, effect: Effect) -> Effect {
-        if self.sess.keys.is_some() || !effect.needs_keys() {
+        if !effect.needs_keys() {
+            return effect;
+        }
+        if let Some(identity) = self.sess.keys.as_ref().and_then(Keys::agent_identity)
+            && !agent::holds(identity)
+        {
+            self.sess.keys = None;
+        }
+        if self.sess.keys.is_some() {
             return effect;
         }
         let identity = match self.sess.context.identity() {
@@ -893,6 +1009,10 @@ impl App {
             }
         };
         match crypto::needs_passphrase(&identity) {
+            Ok(true) if agent::holds(&identity) => {
+                self.sess.keys = Some(Keys::in_agent(identity));
+                effect
+            }
             Ok(true) => {
                 self.mode = Mode::Unlock(Unlock {
                     input: Input::default(),
@@ -950,7 +1070,7 @@ impl App {
             .sess
             .context
             .identity()
-            .and_then(|identity| crypto::unlock(&identity, Some(&passphrase)));
+            .and_then(|identity| self.unlock_with(&identity, &passphrase));
         let Mode::Unlock(u) = &mut self.mode else {
             return Effect::None;
         };
@@ -973,6 +1093,26 @@ impl App {
                 Effect::None
             }
         }
+    }
+
+    /// Unlock with the typed passphrase: in the agent, when the settings say
+    /// so, else (or if the agent won't start) in this session alone.
+    fn unlock_with(
+        &mut self,
+        identity: &std::path::Path,
+        passphrase: &SecretString,
+    ) -> Result<Keys> {
+        if self.settings.unlock_agent {
+            match agent::keep(identity, passphrase) {
+                Ok(()) => {
+                    self.info(format!("the agent is {}", agent::unlocked()));
+                    return Ok(Keys::in_agent(identity.to_path_buf()));
+                }
+                Err(e) if e.is::<WrongPassphrase>() => return Err(e),
+                Err(e) => self.error(format!("{e:#} — unlocked for this session only")),
+            }
+        }
+        crypto::unlock(identity, Some(passphrase))
     }
 
     fn insert_key(&mut self, key: KeyEvent) -> Effect {
@@ -1571,6 +1711,7 @@ impl App {
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('C') => self.open_contexts(),
+            KeyCode::Char('S') => self.open_settings(),
             KeyCode::Char('u') => self.open_history(),
             _ => {}
         }
@@ -2137,6 +2278,7 @@ impl App {
                     Err(e) => self.error(format!("{e:#}")),
                 }
             }
+            "settings" => self.open_settings(),
             "theme" => match positional.first() {
                 None => {
                     let before = theme::current();

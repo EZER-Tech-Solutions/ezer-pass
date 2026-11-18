@@ -1450,6 +1450,21 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('Y') => {
+                if let Some((path, ..)) = row
+                    && !path.is_empty()
+                {
+                    match clipboard::copy_plain(&path) {
+                        Ok(()) => {
+                            // It replaced any password there, so nothing is
+                            // left for the countdown to clear.
+                            self.last_copy = None;
+                            self.info(format!("copied path {path} to clipboard"));
+                        }
+                        Err(e) => self.error(format!("{e:#}")),
+                    }
+                }
+            }
             KeyCode::Char(c @ '1'..='9') => {
                 let n = c as usize - '1' as usize;
                 if let Some(path) = self.recent.get(n) {

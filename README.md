@@ -81,6 +81,7 @@ marked or cut.
 | `H` / `Backspace` | collapse the folder the cursor is in, landing on it |
 | `-` | collapse everything |
 | `c`, `1`-`5` | copy the highlighted entry, or a recent one |
+| `Y` | copy the highlighted entry's path within the store (`web/github`), to pass to `show`, `run` or `pass`; it isn't cleared |
 | `/` | fuzzy-filter the tree in place; `Esc` clears |
 | `space` | mark / unmark (moves down) |
 | `x` / `y` / `p` | cut / copy the marked (or highlighted) items, paste into the highlighted folder |

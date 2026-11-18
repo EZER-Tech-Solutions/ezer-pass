@@ -1498,6 +1498,7 @@ fn draw_help(f: &mut Frame) {
             &[
                 ("⏎", "view entry (space reveals) · export file"),
                 ("c", "copy password"),
+                ("Y", "copy its path (e.g. web/github)"),
                 ("1-5", "use a recent entry again"),
                 ("e", "edit in $EDITOR"),
                 ("E", "export an entry to a file"),

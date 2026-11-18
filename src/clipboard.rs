@@ -98,6 +98,12 @@ fn get(tool: Tool) -> Option<Zeroizing<Vec<u8>>> {
     out.status.success().then(|| Zeroizing::new(out.stdout))
 }
 
+/// Put `text` on the clipboard and leave it there: for what isn't secret,
+/// like an entry's path.
+pub fn copy_plain(text: &str) -> Result<()> {
+    set(tool()?, text.as_bytes())
+}
+
 /// Put `secret` on the clipboard and clear it after `clear_after()`
 /// seconds.
 pub fn copy(secret: &str) -> Result<()> {

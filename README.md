@@ -25,9 +25,22 @@ Entry *contents* are encrypted; folder and entry *names* are not, just as with
 ## Install
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/EZER-Tech-Solutions/ezer-pass
 ezer-pass init        # makes your identity (asks for a passphrase) and the store
 ```
+
+Run the same `cargo install` again to update to the latest commit on `main`
+(it does nothing if you already have it). From a checkout, `cargo install
+--path .` installs that copy instead.
+
+If the repository is private, install over SSH so cargo uses your GitHub key:
+
+```sh
+cargo install --git ssh://git@github.com/EZER-Tech-Solutions/ezer-pass.git
+```
+
+If cargo can't authenticate, add `net.git-fetch-with-cli = true` under `[net]`
+in `~/.cargo/config.toml` so it fetches with your system `git`.
 
 The store lives in `~/.local/share/ezer-pass/default`. If you already have a
 `~/.password-store` (from `pass`, or an older ezer-pass), it is used where it

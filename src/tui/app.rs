@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 /// How many recently used entries the bottom pane keeps (and `1`-`5` copy).
 pub const RECENT_MAX: usize = 5;
 
+/// How often to check the store for changes made outside this TUI.
+const WATCH_EVERY: Duration = Duration::from_secs(2);
+
 /// Work the event loop must do: decrypting (which may first need the
 /// identity unlocked), or anything with the terminal in hand ($EDITOR,
 /// prompts, output).
@@ -268,6 +271,10 @@ pub struct App {
     /// The last key press (or the end of something run with the
     /// terminal handed over, like $EDITOR), for locking when idle.
     pub last_key: Instant,
+    /// The store's fingerprint as last shown, and when it was last
+    /// checked, for picking up changes made outside this TUI.
+    fingerprint: u64,
+    last_scan: Instant,
 }
 
 impl App {
@@ -301,6 +308,8 @@ impl App {
             preview: None,
             settings: Settings::load(),
             last_key: Instant::now(),
+            fingerprint: 0,
+            last_scan: Instant::now(),
         };
         app.count_contexts();
         app.refresh_git();
@@ -451,6 +460,9 @@ impl App {
     pub fn refresh_git(&mut self) {
         // Whatever changed the store may have changed the preview's row.
         self.preview = None;
+        // Everything that changes the store ends here, so what this TUI
+        // did itself isn't mistaken for a change from elsewhere.
+        self.fingerprint = self.sess.store.fingerprint();
         self.upstream = git::upstream(self.sess.store.root());
         self.ahead = if self.upstream.is_some() {
             git::ahead_count(self.sess.store.root())
@@ -551,6 +563,7 @@ impl App {
         {
             view.revealed_at = None;
         }
+        self.watch_store();
         if let Mode::Sync(sync) = &mut self.mode
             && let Some(true) = sync.poll()
         {
@@ -1292,6 +1305,33 @@ impl App {
         }
     }
 
+    /// Re-read the store from disk, for changes made outside this TUI.
+    fn reload(&mut self) {
+        self.reload_files();
+        self.prune();
+        if let Some(f) = &mut self.filter {
+            f.index = self.sess.store.walk();
+        }
+        self.rebuild(None);
+        self.refresh_git();
+    }
+
+    /// Pick up changes another session or a script made to the store.
+    /// Only while browsing or filtering: a popup may be holding paths
+    /// (a delete to confirm, an entry being inserted), so the change waits
+    /// until it closes.
+    fn watch_store(&mut self) {
+        if self.last_scan.elapsed() < WATCH_EVERY
+            || !matches!(self.mode, Mode::Browse | Mode::Filter)
+        {
+            return;
+        }
+        self.last_scan = Instant::now();
+        if self.sess.store.fingerprint() != self.fingerprint {
+            self.reload();
+        }
+    }
+
     /// Catch up with files changed under us (an undo, a rollback).
     fn store_changed(&mut self) {
         self.reload_files();
@@ -1700,13 +1740,7 @@ impl App {
                 }
             }
             KeyCode::Char('R') => {
-                self.reload_files();
-                self.prune();
-                if let Some(f) = &mut self.filter {
-                    f.index = self.sess.store.walk();
-                }
-                self.rebuild(None);
-                self.refresh_git();
+                self.reload();
                 self.info("refreshed");
             }
             KeyCode::Char('?') => self.mode = Mode::Help,

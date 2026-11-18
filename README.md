@@ -109,7 +109,7 @@ marked or cut.
 | `:theme` | pick a color theme — default, catppuccin, dracula, gruvbox, nord, tokyo-night or light — drawn as you move; `⏎` keeps it, `Esc` goes back. `:theme nord` sets one directly. All but default use 24-bit color. Remembered in `$XDG_STATE_HOME/ezer-pass/theme` |
 | `S` | settings (also `:settings`): whether unlocking here unlocks the agent too, how long the TUI waits before locking when idle, and the theme. `←→` change one, saved at once to `$XDG_CONFIG_HOME/ezer-pass/settings` |
 | `Esc` | clear the filter, then marks, then the buffer |
-| `R` / `?` / `q` | refresh / help / quit |
+| `R` / `?` / `q` | refresh (rarely needed: changes from another session or a script show up on their own within a couple of seconds) / help / quit |
 
 - Pasting moves or copies, re-encrypting entries that land in a folder with
   different recipients, and every change is a git commit. Overwriting an

@@ -1,4 +1,5 @@
 use crate::crypto::{self, Keys};
+use crate::index;
 use age::x25519::Recipient;
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -221,6 +222,47 @@ impl Store {
         out
     }
 
+    /// A cheap summary of the store's shape, for noticing changes made by
+    /// another session or a script. Entries are written to a temporary file
+    /// and renamed into place, so any add, edit, delete or move changes a
+    /// name or inode in its folder's listing; nothing is stat'ed but the
+    /// folders themselves. git's top level and refs are included for the
+    /// ahead count, and the file index's mtime as it is rewritten in place.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        use std::os::unix::fs::DirEntryExt;
+        let mtime = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+        let mut h = DefaultHasher::new();
+        mtime(&self.root.join(index::FILE_NAME)).hash(&mut h);
+        let git = self.root.join(".git");
+        let refs = git.join("refs");
+        let mut stack = vec![self.root.clone(), git.clone()];
+        while let Some(dir) = stack.pop() {
+            dir.hash(&mut h);
+            mtime(&dir).hash(&mut h);
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                entry.file_name().hash(&mut h);
+                entry.ino().hash(&mut h);
+                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let path = entry.path();
+                let descend = if path.starts_with(&git) {
+                    path.starts_with(&refs)
+                } else {
+                    !entry.file_name().to_string_lossy().starts_with('.')
+                };
+                if descend {
+                    stack.push(path);
+                }
+            }
+        }
+        h.finish()
+    }
+
     /// Last modification time of an entry's file.
     pub fn modified(&self, store_path: &str) -> Option<std::time::SystemTime> {
         fs::metadata(self.entry_file(store_path))
@@ -299,6 +341,34 @@ pub fn parent(store_path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_sees_changes_in_nested_folders() {
+        let root = std::env::temp_dir().join(format!("ezer-pass-fp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        let store = Store { root: root.clone() };
+        let entry = root.join("a/b/x.age");
+        let mut last = store.fingerprint();
+        let mut changed = |what: &str| {
+            let now = store.fingerprint();
+            assert_ne!(now, last, "{what} went unnoticed");
+            last = now;
+        };
+
+        store.write_file(&entry, b"one").unwrap();
+        changed("adding an entry");
+        store.write_file(&entry, b"two").unwrap();
+        changed("rewriting an entry");
+        fs::remove_file(&entry).unwrap();
+        changed("deleting an entry");
+        fs::create_dir(root.join("a/c")).unwrap();
+        changed("adding a folder");
+        fs::write(root.join(crate::index::FILE_NAME), "x\t1\n").unwrap();
+        changed("rewriting the file index");
+        assert_eq!(store.fingerprint(), last, "nothing changed");
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn entries_follow_the_nearest_recipients() {

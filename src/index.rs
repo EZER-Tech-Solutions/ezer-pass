@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const FILE_NAME: &str = ".files";
+pub const FILE_NAME: &str = ".files";
 
 #[derive(Default)]
 pub struct FileIndex {

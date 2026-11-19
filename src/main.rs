@@ -13,6 +13,7 @@ mod fileio;
 mod git;
 mod index;
 mod password;
+mod prompt;
 mod repl;
 mod setup;
 mod store;

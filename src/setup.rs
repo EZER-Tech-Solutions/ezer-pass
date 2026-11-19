@@ -5,6 +5,7 @@
 use crate::commands::Session;
 use crate::context::tilde;
 use crate::crypto::{self, Keys, WrongPassphrase};
+use crate::prompt::{self, Icon};
 use crate::store::{self, RECIPIENTS};
 use crate::{agent, git};
 use age::secrecy::SecretString;
@@ -51,13 +52,12 @@ pub fn ask_passphrase<T>(
 ) -> Result<T> {
     let mut tries = 0;
     loop {
-        let passphrase = SecretString::from(
-            rpassword::prompt_password(format!("passphrase for {}: ", tilde(path)))
-                .context("no terminal to ask the passphrase on: run `ezer-pass unlock` first")?,
-        );
+        let typed = prompt::hidden(Icon::Lock, "passphrase for", Some(&tilde(path)))
+            .context("couldn't ask for the passphrase: run `ezer-pass unlock` first")?;
+        let passphrase = SecretString::from(typed.to_string());
         match try_it(&passphrase) {
             Err(e) if e.is::<WrongPassphrase>() && tries < 2 => {
-                eprintln!("{}", "wrong passphrase, try again".red());
+                eprintln!("  {}", "✗ wrong passphrase, try again".red());
                 tries += 1;
             }
             result => return result,
@@ -67,13 +67,11 @@ pub fn ask_passphrase<T>(
 
 /// Ask for a new passphrase twice.
 fn new_passphrase() -> Result<SecretString> {
-    let first = Zeroizing::new(rpassword::prompt_password(
-        "passphrase for your new identity: ",
-    )?);
+    let first = prompt::hidden(Icon::Key, "passphrase for your new identity", None)?;
     if first.is_empty() {
         bail!("an empty passphrase would leave your key unprotected; nothing made");
     }
-    let again = Zeroizing::new(rpassword::prompt_password("the same passphrase again: ")?);
+    let again = prompt::hidden(Icon::Key, "the same passphrase again", None)?;
     if first != again {
         bail!("the passphrases don't match; nothing made");
     }

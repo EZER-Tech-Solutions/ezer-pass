@@ -1,6 +1,7 @@
 use crate::context;
 use crate::crypto::{self, Keys};
 use crate::password::{self, Kind, Spec};
+use crate::prompt::{self, Icon};
 use crate::store::{self, EXT};
 use crate::{agent, clipboard, fileio, git, index, setup};
 use age::x25519::Recipient;
@@ -1625,12 +1626,8 @@ fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result
         std::io::stdin().lock().read_line(&mut line)?;
         Zeroizing::new(format!("{}\n", line.trim_end_matches(['\r', '\n'])))
     } else {
-        let first = Zeroizing::new(rpassword::prompt_password(format!(
-            "Enter password for {shown}: "
-        ))?);
-        let again = Zeroizing::new(rpassword::prompt_password(format!(
-            "Retype password for {shown}: "
-        ))?);
+        let first = prompt::hidden(Icon::Key, "password for", Some(&shown))?;
+        let again = prompt::hidden(Icon::Key, "the same password again", None)?;
         if first != again {
             bail!("the passwords don't match; nothing saved");
         }

@@ -26,7 +26,7 @@ fn paint(code: &str, text: &str) -> String {
 }
 
 const ACCENT: &str = "1;91";
-const SUBJECT: &str = "36";
+const SUBJECT: &str = "90";
 
 /// Ask for a secret: `[tag]`, then `subject` (what it's for, a path).
 pub fn hidden(tag: &str, subject: &str) -> Result<Zeroizing<String>> {

@@ -52,12 +52,12 @@ pub fn ask_passphrase<T>(
 ) -> Result<T> {
     let mut tries = 0;
     loop {
-        let typed = prompt::hidden("passphrase for", Some(&tilde(path)))
+        let typed = prompt::hidden("unlock", &tilde(path))
             .context("couldn't ask for the passphrase: run `ezer-pass unlock` first")?;
         let passphrase = SecretString::from(typed.to_string());
         match try_it(&passphrase) {
             Err(e) if e.is::<WrongPassphrase>() && tries < 2 => {
-                eprintln!("  {}", "✗ wrong passphrase, try again".red());
+                eprintln!("{}", "✗ wrong passphrase, try again".red());
                 tries += 1;
             }
             result => return result,
@@ -66,12 +66,12 @@ pub fn ask_passphrase<T>(
 }
 
 /// Ask for a new passphrase twice.
-fn new_passphrase() -> Result<SecretString> {
-    let first = prompt::hidden("passphrase for your new identity", None)?;
+fn new_passphrase(path: &Path) -> Result<SecretString> {
+    let first = prompt::hidden("new", &tilde(path))?;
     if first.is_empty() {
         bail!("an empty passphrase would leave your key unprotected; nothing made");
     }
-    let again = prompt::hidden("the same passphrase again", None)?;
+    let again = prompt::hidden("again", &tilde(path))?;
     if first != again {
         bail!("the passphrases don't match; nothing made");
     }
@@ -86,7 +86,7 @@ fn ensure_identity(sess: &mut Session) -> Result<()> {
         return Ok(());
     }
     println!("no identity yet; making one at {}", tilde(&path).cyan());
-    let passphrase = new_passphrase()?;
+    let passphrase = new_passphrase(&path)?;
     let public = crypto::create_identity(&path, &passphrase)?;
     sess.keys = Some(crypto::unlock(&path, Some(&passphrase))?);
     println!("your public key is {}", public.to_string().green());

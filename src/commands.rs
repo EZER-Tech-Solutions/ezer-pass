@@ -1626,8 +1626,8 @@ fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result
         std::io::stdin().lock().read_line(&mut line)?;
         Zeroizing::new(format!("{}\n", line.trim_end_matches(['\r', '\n'])))
     } else {
-        let first = prompt::hidden("password for", Some(&shown))?;
-        let again = prompt::hidden("the same password again", None)?;
+        let first = prompt::hidden("insert", &shown)?;
+        let again = prompt::hidden("again", &shown)?;
         if first != again {
             bail!("the passwords don't match; nothing saved");
         }

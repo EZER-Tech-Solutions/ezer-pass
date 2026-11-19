@@ -1,6 +1,6 @@
-//! Asking for a secret on the terminal: a label on one line, then the
-//! input on the next, drawn as bullets so you can see
-//! what you've typed without anything being shown. Read from `/dev/tty`,
+//! Asking for a secret on the terminal, on one line: `[tag] subject ›`
+//! and the input drawn as bullets, so you can see what you've typed
+//! without anything being shown. Read from `/dev/tty`,
 //! so it works with stdin or stdout piped.
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,25 +28,25 @@ fn paint(code: &str, text: &str) -> String {
 const ACCENT: &str = "1;91";
 const SUBJECT: &str = "36";
 
-/// Ask for a secret: `label`, then `subject` (a path) in its own color.
-pub fn hidden(label: &str, subject: Option<&str>) -> Result<Zeroizing<String>> {
+/// Ask for a secret: `[tag]`, then `subject` (what it's for, a path).
+pub fn hidden(tag: &str, subject: &str) -> Result<Zeroizing<String>> {
     let mut tty = OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
         .context("no terminal to ask on")?;
-    let mut head = paint("1", label);
-    if let Some(s) = subject {
-        head.push(' ');
-        head.push_str(&paint(SUBJECT, s));
-    }
-    writeln!(tty, "{head}")?;
-
-    let width = bullets_width(&tty);
+    let head = format!(
+        "{} {} {}",
+        paint(ACCENT, &format!("[{tag}]")),
+        paint(SUBJECT, subject),
+        paint(ACCENT, "›")
+    );
+    let head_width = tag.chars().count() + subject.chars().count() + 6;
+    let width = bullets_width(&tty, head_width);
     let mut field = Field::default();
     let result = {
         let _raw = Raw::enter(&tty)?;
-        draw(&mut tty, &field, width)?;
+        draw(&mut tty, &head, &field, width)?;
         loop {
             let mut byte = [0u8];
             if tty.read(&mut byte)? == 0 {
@@ -55,7 +55,7 @@ pub fn hidden(label: &str, subject: Option<&str>) -> Result<Zeroizing<String>> {
             match field.feed(byte[0]) {
                 Step::Done => break Ok(()),
                 Step::Cancel => break Err(anyhow!("cancelled")),
-                Step::Changed => draw(&mut tty, &field, width)?,
+                Step::Changed => draw(&mut tty, &head, &field, width)?,
                 Step::Same => {}
             }
         }
@@ -65,25 +65,20 @@ pub fn hidden(label: &str, subject: Option<&str>) -> Result<Zeroizing<String>> {
     field.into_string()
 }
 
-/// Redraw the input line.
-fn draw(tty: &mut File, field: &Field, width: usize) -> io::Result<()> {
+/// Redraw the prompt line.
+fn draw(tty: &mut File, head: &str, field: &Field, width: usize) -> io::Result<()> {
     let n = field.chars();
     let dots = if n > width {
         "•".repeat(width - 1) + "…"
     } else {
         "•".repeat(n)
     };
-    write!(
-        tty,
-        "\r\x1b[2K  {} {}",
-        paint(ACCENT, "›"),
-        paint("2", &dots)
-    )?;
+    write!(tty, "\r\x1b[2K{head} {}", paint("2", &dots))?;
     tty.flush()
 }
 
-/// How many bullets fit on the input line without wrapping.
-fn bullets_width(tty: &File) -> usize {
+/// How many bullets fit after a `head` this wide without wrapping.
+fn bullets_width(tty: &File, head: usize) -> usize {
     let mut size = MaybeUninit::<libc::winsize>::zeroed();
     // SAFETY: TIOCGWINSZ fills a winsize; on failure it stays zeroed.
     let cols = unsafe {
@@ -92,7 +87,7 @@ fn bullets_width(tty: &File) -> usize {
     };
     match cols {
         0 => 40,
-        c => c.saturating_sub(6).clamp(8, 48),
+        c => c.saturating_sub(head + 1).clamp(8, 48),
     }
 }
 

@@ -15,6 +15,7 @@ use age::x25519;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -203,8 +204,9 @@ pub fn recipients(identity: &Path) -> Vec<x25519::Recipient> {
 pub fn unlock(identity: &Path) -> Result<()> {
     if !crypto::needs_passphrase(identity)? {
         println!(
-            "{} has no passphrase, so there is nothing to unlock",
-            tilde(identity)
+            "{} {}",
+            tilde(identity).cyan(),
+            "has no passphrase, so there is nothing to unlock".dimmed()
         );
         return Ok(());
     }
@@ -214,12 +216,17 @@ pub fn unlock(identity: &Path) -> Result<()> {
             identity: key.clone(),
         };
         if matches!(exchange(stream, &status)?, Reply::Done) {
-            println!("{} is already unlocked", tilde(identity));
+            println!(
+                "{} {} {}",
+                "✓".green().bold(),
+                tilde(identity).cyan(),
+                "is already unlocked".green()
+            );
             return Ok(());
         }
     }
     setup::ask_passphrase(identity, |passphrase| keep(identity, passphrase))?;
-    println!("{}", unlocked());
+    println!("{}", unlocked_styled());
     Ok(())
 }
 
@@ -245,6 +252,26 @@ pub fn unlocked() -> String {
         secs => format!(
             "unlocked; it locks again after {} unused (or on `ezer-pass lock`)",
             minutes(secs)
+        ),
+    }
+}
+
+/// `unlocked()` for the terminal, in color.
+pub fn unlocked_styled() -> String {
+    let lock = "`ezer-pass lock`".cyan();
+    match idle_timeout() {
+        0 => format!(
+            "{} {} {lock}",
+            "✓ unlocked".green().bold(),
+            "until".dimmed()
+        ),
+        secs => format!(
+            "{}{} {} {}{lock}{}",
+            "✓ unlocked".green().bold(),
+            "; it locks again after".dimmed(),
+            minutes(secs).yellow().bold(),
+            "unused (or on".dimmed().to_string() + " ",
+            ")".dimmed()
         ),
     }
 }
@@ -290,9 +317,9 @@ pub fn lock() -> Result<()> {
     match connect() {
         Some(stream) => {
             exchange(stream, &Request::Lock)?;
-            println!("locked");
+            println!("{}", "✓ locked".yellow().bold());
         }
-        None => println!("not unlocked"),
+        None => println!("{}", "not unlocked".dimmed()),
     }
     Ok(())
 }

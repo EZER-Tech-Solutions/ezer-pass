@@ -19,6 +19,7 @@ mod setup;
 mod store;
 mod tui;
 
+use colored::Colorize;
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
@@ -52,7 +53,7 @@ fn main() -> ExitCode {
         return match browserpass::run(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("ezer-pass: {e:#}");
+                eprintln!("{} {e:#}", "ezer-pass:".red().bold());
                 ExitCode::FAILURE
             }
         };
@@ -63,7 +64,7 @@ fn main() -> ExitCode {
     let named = match take_context_flag(&mut args) {
         Ok(named) => named,
         Err(e) => {
-            eprintln!("ezer-pass: {e:#}");
+            eprintln!("{} {e:#}", "ezer-pass:".red().bold());
             return ExitCode::FAILURE;
         }
     };
@@ -76,14 +77,16 @@ fn main() -> ExitCode {
     let (context, store) = match opened {
         Ok(opened) => opened,
         Err(e) => {
-            eprintln!("ezer-pass: {e:#}");
+            eprintln!("{} {e:#}", "ezer-pass:".red().bold());
             return ExitCode::FAILURE;
         }
     };
     // A store made by `pass` is unreadable until it is moved to age.
     if store.uses_gpg() && !matches!(command, Some("migrate" | "git" | "help" | "context")) {
         eprintln!(
-            "ezer-pass: this store is still encrypted with gpg — run `ezer-pass migrate` to move it to age (gpg asks for your passphrase one last time)"
+            "{} this store is still encrypted with gpg — run {} to move it to age (gpg asks for your passphrase one last time)",
+            "ezer-pass:".red().bold(),
+            "`ezer-pass migrate`".cyan()
         );
         return ExitCode::FAILURE;
     }
@@ -116,7 +119,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("ezer-pass: {e:#}");
+            eprintln!("{} {e:#}", "ezer-pass:".red().bold());
             ExitCode::FAILURE
         }
     }

@@ -1,5 +1,5 @@
-//! Asking for a secret on the terminal: a Nerd Font glyph and a label on
-//! one line, then the input on the next, drawn as bullets so you can see
+//! Asking for a secret on the terminal: a label on one line, then the
+//! input on the next, drawn as bullets so you can see
 //! what you've typed without anything being shown. Read from `/dev/tty`,
 //! so it works with stdin or stdout piped.
 
@@ -10,31 +10,6 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::sync::OnceLock;
 use zeroize::{Zeroize, Zeroizing};
-
-/// The glyph in front of a prompt, as in the TUI's popups.
-#[derive(Clone, Copy)]
-pub enum Icon {
-    /// Unlocking something that exists.
-    Lock,
-    /// Choosing a new secret.
-    Key,
-}
-
-impl Icon {
-    fn glyph(self) -> &'static str {
-        match (plain_icons(), self) {
-            (false, Icon::Lock) => "\u{f023}",
-            (false, Icon::Key) => "\u{f084}",
-            (true, _) => "*",
-        }
-    }
-}
-
-/// `EZER_PASS_ICONS=plain`: no Nerd Font glyphs, for fonts without them.
-pub fn plain_icons() -> bool {
-    static PLAIN: OnceLock<bool> = OnceLock::new();
-    *PLAIN.get_or_init(|| std::env::var("EZER_PASS_ICONS").is_ok_and(|v| v == "plain"))
-}
 
 fn color() -> bool {
     static COLOR: OnceLock<bool> = OnceLock::new();
@@ -54,13 +29,13 @@ const ACCENT: &str = "1;91";
 const SUBJECT: &str = "36";
 
 /// Ask for a secret: `label`, then `subject` (a path) in its own color.
-pub fn hidden(icon: Icon, label: &str, subject: Option<&str>) -> Result<Zeroizing<String>> {
+pub fn hidden(label: &str, subject: Option<&str>) -> Result<Zeroizing<String>> {
     let mut tty = OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
         .context("no terminal to ask on")?;
-    let mut head = format!("{} {}", paint(ACCENT, icon.glyph()), paint("1", label));
+    let mut head = paint("1", label);
     if let Some(s) = subject {
         head.push(' ');
         head.push_str(&paint(SUBJECT, s));
@@ -102,7 +77,7 @@ fn draw(tty: &mut File, field: &Field, width: usize) -> io::Result<()> {
         tty,
         "\r\x1b[2K  {} {}",
         paint(ACCENT, "›"),
-        paint("1", &dots)
+        paint("2", &dots)
     )?;
     tty.flush()
 }

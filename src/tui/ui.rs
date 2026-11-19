@@ -17,6 +17,7 @@ use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 const MASK: &str = "••••••••••••";
@@ -197,7 +198,9 @@ fn path_spans(path: &str, style: Style) -> Vec<Span<'static>> {
 /// A folder's icon, with the space after it: Nerd Font folder glyphs, or
 /// triangles with `EZER_PASS_ICONS=plain` for fonts without them.
 fn folder_icon(open: bool) -> &'static str {
-    match (crate::prompt::plain_icons(), open) {
+    static PLAIN: OnceLock<bool> = OnceLock::new();
+    let plain = *PLAIN.get_or_init(|| std::env::var("EZER_PASS_ICONS").is_ok_and(|v| v == "plain"));
+    match (plain, open) {
         (false, true) => "\u{f07c} ",
         (false, false) => "\u{f07b} ",
         (true, true) => "▼ ",

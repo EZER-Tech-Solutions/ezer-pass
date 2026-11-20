@@ -60,7 +60,7 @@ pub const SPECS: &[Spec] = &[
     spec("cd", "[path]", "go to a folder in the tree", Arg::Dir),
     spec(
         "import",
-        "[--force] <file> <entry>",
+        "[--force] <file> [entry]",
         "store a file as an entry",
         Arg::File,
     ),

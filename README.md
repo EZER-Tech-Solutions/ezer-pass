@@ -177,7 +177,7 @@ hunter2
 | `mv [-f] <src> <dest>` / `cp [-f] <src> <dest>` | rename or copy, re-encrypting for the new folder's recipients if they differ. Either side can be in another context: `mv work:/servers/web1 /servers/` |
 | `find <terms>` | list entries whose names contain any term |
 | `grep [-i] <text>` | search inside entries (ignores case unless `text` has capitals) |
-| `import [--force] <file> <entry>` | store a file as a base64 entry |
+| `import [--force] <file> [entry]` | store a file as a base64 entry; without an entry name it lands in the current folder named after the file, minus its extension (`cert.pem` becomes `cert`) |
 | `export [-f] <entry> [dest]` | write a file entry back to disk |
 | `reindex [path]` | find file entries the index doesn't know about (older stores) |
 | `run [-e VAR=entry]... [--env-file FILE] [--] <cmd> [args]` | run a command with entries' passwords in its environment; one-shot only, see [Scripts and coding agents](#scripts-and-coding-agents) |

@@ -300,9 +300,9 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             cmd_reindex(sess, positional.first().copied())?
         }
         "import" => {
-            expect_args(&positional, "import [--force] <file> <entry>", 2, 2)?;
+            expect_args(&positional, "import [--force] <file> [entry]", 1, 2)?;
             let force = flags.iter().any(|f| *f == "-f" || *f == "--force");
-            cmd_import(sess, positional[0], positional[1], force)?
+            cmd_import(sess, positional[0], positional.get(1).copied(), force)?
         }
         "export" => {
             expect_args(&positional, "export [-f] <entry> [dest]", 1, 2)?;
@@ -1597,9 +1597,9 @@ fn cmd_reindex(sess: &mut Session, arg: Option<&str>) -> Result<()> {
 fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result<()> {
     // `insert --file <os-file> <entry>` is an alias for `import`.
     if flags.contains(&"--file") {
-        expect_args(positional, "insert --file [--force] <file> <entry>", 2, 2)?;
+        expect_args(positional, "insert --file [--force] <file> [entry]", 1, 2)?;
         let force = flags.contains(&"--force");
-        return cmd_import(sess, positional[0], positional[1], force);
+        return cmd_import(sess, positional[0], positional.get(1).copied(), force);
     }
     expect_args(positional, "insert [-m] [-e] [-f] <entry>", 1, 1)?;
     let has = |names: &[&str]| flags.iter().any(|f| names.contains(f));
@@ -1649,8 +1649,24 @@ fn cmd_insert(sess: &mut Session, flags: &[&str], positional: &[&str]) -> Result
 }
 
 /// Import a file from the OS filesystem into the password store as a base64-encoded entry.
-fn cmd_import(sess: &mut Session, os_file: &str, entry: &str, force: bool) -> Result<()> {
-    let path = sess.resolve(entry);
+/// Without an entry name, it goes in the current folder under the file's name minus its
+/// extension (`cert.pem` becomes `cert`).
+fn cmd_import(sess: &mut Session, os_file: &str, entry: Option<&str>, force: bool) -> Result<()> {
+    let filename = Path::new(os_file)
+        .file_name()
+        .context("path has no filename")?
+        .to_string_lossy()
+        .into_owned();
+    let path = match entry {
+        Some(entry) => sess.resolve(entry),
+        None => {
+            let stem = Path::new(&filename)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| filename.clone());
+            sess.resolve(&stem)
+        }
+    };
     if sess.store.is_entry(&path) && !force {
         bail!(
             "{} already exists (pass --force to overwrite)",
@@ -1672,10 +1688,6 @@ fn cmd_import(sess: &mut Session, os_file: &str, entry: &str, force: bool) -> Re
         );
     }
     let data = std::fs::read(os_file).with_context(|| format!("cannot read {os_file}"))?;
-    let filename = Path::new(os_file)
-        .file_name()
-        .context("path has no filename")?
-        .to_string_lossy();
     let payload = Zeroizing::new(fileio::encode_payload(&filename, &data));
     sess.save(
         &path,
@@ -1782,8 +1794,8 @@ fn print_help() {
     println!();
     section("files (base64-encoded entries)");
     entry(
-        "import [--force] <file> <entry>",
-        "store a file as an entry (1 MiB soft limit)",
+        "import [--force] <file> [entry]",
+        "store a file as an entry, named after the file by default (1 MiB soft limit)",
     );
     entry(
         "export [-f] <entry> [dest]",

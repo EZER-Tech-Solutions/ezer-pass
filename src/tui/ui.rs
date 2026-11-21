@@ -1547,6 +1547,7 @@ fn draw_help(f: &mut Frame) {
                 ("i", "insert a password here"),
                 ("n", "make a folder here"),
                 ("I", "import a file here"),
+                ("O", "add a one-time code (to this entry)"),
             ],
         ),
         (

@@ -96,6 +96,7 @@ marked or cut.
 | `e` | edit in `$VISUAL` / `$EDITOR` |
 | `g` | generate a password in the highlighted folder: pick name, an optional login (written as a `login:` line, for browserpass), type (symbols, letters & digits, url-safe, digits, hex, passphrase), length (its strength in bits is shown) and whether to avoid look-alikes like `0O1lI` — or, for a passphrase, what goes between the words and whether to capitalize them and end with a digit; it goes straight to the clipboard and opens masked, never printed; leave the name empty to only copy it, saving nothing. Tab, ↑↓ or ctrl+j/k move between fields. These settings are remembered; on an existing entry it replaces only the password line (and its login line, if you give one) |
 | `i` `n` `I` `E` | insert, mkdir, import, export — opens the command line, pre-filled, in the highlighted folder |
+| `O` | add a one-time code: opens `:otp add` with the highlighted entry (or, on a folder, for a new entry in it) |
 | `:` | command palette: every command with its usage, narrowing as you type; then entries and folders for its path. `↑↓` pick, `Tab` completes, `⏎` runs; `Ctrl-P`/`Ctrl-N` walk history |
 | `C` | switch context: pick another vault, or `n` to add one (see [Contexts](#contexts)) |
 | `:theme` | pick a color theme — default, catppuccin, dracula, gruvbox, nord, tokyo-night or light — drawn as you move; `⏎` keeps it, `Esc` goes back. `:theme nord` sets one directly. All but default use 24-bit color. Remembered in `$XDG_STATE_HOME/ezer-pass/theme` |
@@ -378,8 +379,8 @@ otpauth://totp/GitHub:me?secret=JBSWY3DPEHPK3PXP&issuer=GitHub
 
 `otp add github` asks for the URI, or just the secret a site shows under
 "can't scan the code?", and adds the line; `otp github` prints the current
-code, `otp -c github` copies it. In the TUI, `o` copies the highlighted
-entry's code, and the view popup and preview show only that the entry has
+code, `otp -c github` copies it. In the TUI, `O` adds one to the highlighted
+entry and `o` copies its code, and the view popup and preview show only that the entry has
 one, never the secret. SHA1, SHA256 and SHA512, 6 to 8 digits and any
 period work; counter-based (`hotp`) codes don't.
 

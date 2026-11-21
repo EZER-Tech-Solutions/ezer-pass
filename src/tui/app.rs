@@ -1724,6 +1724,11 @@ impl App {
             KeyCode::Char('i') => self.prefill("insert ".into()),
             KeyCode::Char('n') => self.prefill("mkdir ".into()),
             KeyCode::Char('I') => self.prefill("import ".into()),
+            // On an entry, add its code; elsewhere, name a new one.
+            KeyCode::Char('O') => {
+                let name = self.selected_entry().map(|p| quote(basename(&p)));
+                self.prefill(format!("otp add {}", name.unwrap_or_default()));
+            }
             KeyCode::Char(':') => self.prefill(String::new()),
             KeyCode::Char('-') => {
                 self.expanded.clear();

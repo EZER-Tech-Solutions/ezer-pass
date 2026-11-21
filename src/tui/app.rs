@@ -34,6 +34,8 @@ pub enum Effect {
     Decrypt(String),
     /// Copy an entry's first line to the clipboard.
     Copy(String),
+    /// Copy an entry's current one-time code to the clipboard.
+    CopyOtp(String),
     /// Try the passphrase typed into the unlock popup.
     Unlock,
     /// Run commands with the terminal handed back to them.
@@ -62,7 +64,10 @@ impl Effect {
         match self {
             // A new password opens in the view popup afterwards, so ask
             // before generating, not after.
-            Effect::Decrypt(_) | Effect::Copy(_) | Effect::Generate { path: Some(_), .. } => true,
+            Effect::Decrypt(_)
+            | Effect::Copy(_)
+            | Effect::CopyOtp(_)
+            | Effect::Generate { path: Some(_), .. } => true,
             Effect::Run(batch) => batch.jobs.iter().any(|j| commands::needs_keys(&j.argv)),
             _ => false,
         }
@@ -832,12 +837,15 @@ impl App {
         });
     }
 
-    pub fn finish_copy(&mut self, path: &str, result: Result<()>) {
+    pub fn finish_copy(&mut self, path: &str, what: &str, result: Result<()>) {
         match result {
             Ok(()) => {
                 self.push_recent(path);
                 self.last_copy = Some((path.to_string(), Instant::now()));
-                self.info(format!("copied {} to clipboard", store::display(path)));
+                self.info(format!(
+                    "copied {what}{} to clipboard",
+                    store::display(path)
+                ));
             }
             Err(e) => {
                 self.forget_locked_agent(&e);
@@ -1630,6 +1638,13 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('o') => {
+                if let Some(path) = self.selected_entry()
+                    && !self.sess.files.is_file(&path)
+                {
+                    return Effect::CopyOtp(path);
+                }
+            }
             KeyCode::Char('Y') => {
                 if let Some((path, ..)) = row
                     && !path.is_empty()
@@ -2065,6 +2080,11 @@ impl App {
                 self.mode = Mode::Browse;
                 return Effect::Copy(path);
             }
+            KeyCode::Char('o') if matches!(view.secret, Secret::Text(_)) => {
+                let path = view.path.clone();
+                self.mode = Mode::Browse;
+                return Effect::CopyOtp(path);
+            }
             KeyCode::Char('E' | 'x') if matches!(view.secret, Secret::File { .. }) => {
                 let path = view.path.clone();
                 self.export_prompt(&path);
@@ -2288,6 +2308,19 @@ impl App {
                 } else {
                     Effect::Decrypt(path)
                 };
+            }
+            // Copy the code rather than printing it.
+            "otp" if positional.len() == 1 => {
+                let path = self.sess.resolve(positional[0]);
+                if !store.is_entry(&path) {
+                    self.error(format!(
+                        "{} is not in the password store",
+                        store::display(&path)
+                    ));
+                    return Effect::None;
+                }
+                self.go_to(&path);
+                return Effect::CopyOtp(path);
             }
             // Ask for the value in a popup rather than on the terminal.
             "insert"

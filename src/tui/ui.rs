@@ -630,7 +630,8 @@ fn draw_info(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The first line of a text entry is the password: masked unless revealed.
-/// Later lines (user:, url:, notes) are shown, with `key:` prefixes tinted.
+/// Later lines (user:, url:, notes) are shown, with `key:` prefixes tinted
+/// and a one-time code's secret hidden.
 fn secret_lines(text: &str, revealed: bool) -> Vec<Line<'_>> {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
@@ -647,7 +648,11 @@ fn secret_lines(text: &str, revealed: bool) -> Vec<Line<'_>> {
 }
 
 /// A line after an entry's password, with a `key:` prefix tinted.
+/// An `otpauth://` line holds a secret, so only says it's there.
 fn field_line(line: &str) -> Line<'_> {
+    if line.trim().starts_with("otpauth://") {
+        return Line::from(vec!["otp: ".cyan(), "one-time code · o copies it".dim()]);
+    }
     match line.split_once(": ") {
         Some((k, v)) if !k.is_empty() && !k.contains(' ') => {
             Line::from(vec![format!("{k}: ").cyan(), v.into()])
@@ -778,14 +783,19 @@ fn draw_view(f: &mut Frame, app: &App) {
         ],
     };
     let mut keys = match &view.secret {
-        Secret::Text(_) if view.revealed_at.is_some() => hint_in(
-            &[("space", "hide"), ("c", "copy"), ("esc", "close")],
-            theme().mark,
-        ),
-        Secret::Text(_) => hint_in(
-            &[("space", "reveal"), ("c", "copy"), ("esc", "close")],
-            theme().mark,
-        ),
+        Secret::Text(text) => {
+            let space = if view.revealed_at.is_some() {
+                "hide"
+            } else {
+                "reveal"
+            };
+            let mut hints = vec![("space", space), ("c", "copy")];
+            if crate::otp::find(text).is_some() {
+                hints.push(("o", "code"));
+            }
+            hints.push(("esc", "close"));
+            hint_in(&hints, theme().mark)
+        }
         Secret::File { .. } => hint_in(&[("E", "export"), ("esc", "close")], theme().mark),
     };
     keys.spans.insert(0, " ".into());
@@ -1510,6 +1520,7 @@ fn draw_help(f: &mut Frame) {
             &[
                 ("⏎", "view entry (space reveals) · export file"),
                 ("c", "copy password"),
+                ("o", "copy its one-time code"),
                 ("Y", "copy its path (e.g. web/github)"),
                 ("1-5", "use a recent entry again"),
                 ("e", "edit in $EDITOR"),

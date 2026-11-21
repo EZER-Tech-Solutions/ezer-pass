@@ -14,7 +14,7 @@ mod theme;
 mod ui;
 
 use crate::commands::{self, Session};
-use crate::{clipboard, fileio, git};
+use crate::{clipboard, fileio, git, otp};
 use anyhow::Result;
 use app::{App, Effect, Pause};
 use colored::Colorize;
@@ -96,7 +96,15 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
                 }
                 clipboard::copy(content.lines().next().unwrap_or(""))
             });
-            app.finish_copy(&path, result);
+            app.finish_copy(&path, "", result);
+        }
+        Effect::CopyOtp(path) => {
+            let keys = app.sess.keys.as_ref().expect("gated");
+            let result = app.sess.store.read_entry(&path, keys).and_then(|content| {
+                let (code, _) = otp::current(&content)?;
+                clipboard::copy(&code)
+            });
+            app.finish_copy(&path, "the code for ", result);
         }
         Effect::Run(batch) => {
             let (done, result) = suspended(terminal, || {

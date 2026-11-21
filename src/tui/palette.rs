@@ -51,6 +51,12 @@ pub const SPECS: &[Spec] = &[
         "view an entry, or -c to copy it",
         Arg::Path,
     ),
+    spec(
+        "otp",
+        "<entry> | add [-f] <entry>",
+        "copy an entry's one-time code, or add one",
+        Arg::Path,
+    ),
     spec("edit", "<entry>", "edit in $EDITOR", Arg::Path),
     spec("mv", "<src> <dest>", "rename or move", Arg::Path),
     spec("cp", "<src> <dest>", "copy", Arg::Path),

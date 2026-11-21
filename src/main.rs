@@ -12,6 +12,7 @@ mod crypto;
 mod fileio;
 mod git;
 mod index;
+mod otp;
 mod password;
 mod prompt;
 mod repl;

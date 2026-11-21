@@ -85,6 +85,7 @@ marked or cut.
 | `H` / `Backspace` | collapse the folder the cursor is in, landing on it |
 | `-` | collapse everything |
 | `c`, `1`-`5` | copy the highlighted entry, or a recent one |
+| `o` | copy the highlighted entry's one-time code (see [One-time codes](#one-time-codes)) |
 | `Y` | copy the highlighted entry's path within the store (`web/github`), to pass to `show`, `run` or `pass`; it isn't cleared |
 | `/` | fuzzy-filter the tree in place; `Esc` clears |
 | `space` | mark / unmark (moves down) |
@@ -161,6 +162,8 @@ hunter2
 | `cd [path]` / `pwd` | move around the store |
 | `mkdir <path>` | create a directory (git tracks it once it holds an entry) |
 | `show [-c] <entry>` | print an entry, or `-c` to copy its first line (cleared after 45 s) |
+| `otp [-c] <entry>` | print the entry's current one-time code, or `-c` to copy it (cleared after 45 s) |
+| `otp add [-f] <entry>` | add an `otpauth://` URI or a bare base32 secret to an entry, asked without echo; replaces one it has, or makes the entry if there is none |
 | `insert [-m] [-e] [-f] <entry>` | add an entry: asks twice without echo; `-m` several lines, `-e` echo |
 | `generate [-n\|--url-safe\|--digits\|--hex\|--passphrase] [--no-ambiguous] [--exclude=CHARS] [--capitalize] [--separator=X] [--login=NAME] [-c] [-q] [-i] [-f] [entry] [len]` | generate a password; `-c` copies instead of printing, `-q` saves it without showing it (for scripts and coding agents, which then pass it on with `run`), `-i` replaces only the first line. `--login` adds a `login:` line under it (with `-i`, updates the entry's login, username or user line). Without an entry (or with only a length) it is printed or copied but not saved. Symbols by default; `-n` letters and digits, `--url-safe` adds only `-_` (for database URLs and `.env` files), `--digits` for PINs, `--hex` for tokens, `--passphrase` for words from the EFF large list joined by `-` (its length counts words, default 7, about 90 bits); `--separator=X` joins them with X instead (`--separator=` for nothing), and `--capitalize` capitalizes each and ends it with a digit, for sites that demand both. It always holds a capital, a small letter, a digit (and a symbol, for the default) when long enough. `--no-ambiguous` leaves out `0O1lI\|`, `--exclude` any characters a site refuses |
 | `edit <entry>` | edit in `$VISUAL` / `$EDITOR`, via a private file in `/dev/shm` that is wiped afterwards |
@@ -360,6 +363,25 @@ how it branched and merged across machines:
 
 ezer-pass's own file-index commits are hidden from the list. History needs the
 store in git (`:git init`).
+
+## One-time codes
+
+An entry can hold a TOTP secret (the two-factor codes authenticator apps
+show) as an `otpauth://totp/...` line, the same format as pass-otp and the
+URI in a site's QR code:
+
+```
+hunter2
+login: me
+otpauth://totp/GitHub:me?secret=JBSWY3DPEHPK3PXP&issuer=GitHub
+```
+
+`otp add github` asks for the URI, or just the secret a site shows under
+"can't scan the code?", and adds the line; `otp github` prints the current
+code, `otp -c github` copies it. In the TUI, `o` copies the highlighted
+entry's code, and the view popup and preview show only that the entry has
+one, never the secret. SHA1, SHA256 and SHA512, 6 to 8 digits and any
+period work; counter-based (`hotp`) codes don't.
 
 ## File entries
 

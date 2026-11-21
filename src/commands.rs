@@ -3,7 +3,7 @@ use crate::crypto::{self, Keys};
 use crate::password::{self, Kind, Spec};
 use crate::prompt;
 use crate::store::{self, EXT};
-use crate::{agent, clipboard, fileio, git, index, setup};
+use crate::{agent, clipboard, fileio, git, index, otp, setup};
 use age::x25519::Recipient;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 /// Every command `run` understands, for completion and the TUI's command line.
 pub const COMMANDS: &[&str] = &[
-    "ls", "cd", "pwd", "mkdir", "show", "insert", "import", "export", "reindex", "generate",
+    "ls", "cd", "pwd", "mkdir", "show", "otp", "insert", "import", "export", "reindex", "generate",
     "edit", "rm", "mv", "cp", "find", "grep", "git", "init", "migrate", "unlock", "lock",
     "context", "help", "exit", "quit",
 ];
@@ -240,7 +240,7 @@ fn confirm(question: &str) -> Result<bool> {
 /// the identity before handing the terminal over.
 pub fn needs_keys(argv: &[String]) -> bool {
     match argv.first().map(String::as_str) {
-        Some("show" | "edit" | "export" | "grep" | "reindex") => true,
+        Some("show" | "otp" | "edit" | "export" | "grep" | "reindex") => true,
         Some("generate") => argv.iter().any(|a| a == "-i" || a == "--in-place"),
         _ => false,
     }
@@ -294,6 +294,19 @@ fn dispatch(sess: &mut Session, argv: &[String]) -> Result<Outcome> {
             let clip = flags.iter().any(|f| *f == "-c" || *f == "--clip");
             cmd_show(sess, positional[0], clip)?
         }
+        "otp" => match positional.as_slice() {
+            ["add", entry] => cmd_otp_add(
+                sess,
+                entry,
+                flags.iter().any(|f| matches!(*f, "-f" | "--force")),
+            )?,
+            [entry] => cmd_otp(
+                sess,
+                entry,
+                flags.iter().any(|f| matches!(*f, "-c" | "--clip")),
+            )?,
+            _ => bail!("usage: otp [-c] <entry> | otp add [-f] <entry>"),
+        },
         "insert" => cmd_insert(sess, &flags, &positional)?,
         "reindex" => {
             expect_args(&positional, "reindex [path]", 0, 1)?;
@@ -713,6 +726,81 @@ fn cmd_show(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
         sess.files.remove(&path);
         print!("{}", *content);
     }
+    Ok(())
+}
+
+/// Print, or copy, an entry's current one-time code.
+fn cmd_otp(sess: &mut Session, arg: &str, clip: bool) -> Result<()> {
+    let path = sess.resolve_entry(arg)?;
+    let content = sess.read(&path)?;
+    let (code, left) = otp::current(&content).with_context(|| store::display(&path))?;
+    if clip {
+        clipboard::copy(&code)?;
+        println!(
+            "copied the code for {} to the clipboard; it changes in {left} seconds",
+            store::display(&path).green()
+        );
+    } else {
+        println!("{}", *code);
+    }
+    Ok(())
+}
+
+/// Ask for an `otpauth://` URI or a bare secret and add it to an entry
+/// (replacing one it has), or make an entry holding only it.
+fn cmd_otp_add(sess: &mut Session, arg: &str, force: bool) -> Result<()> {
+    let path = sess.resolve(arg);
+    let shown = store::display(&path);
+    if path.is_empty() || sess.store.is_dir(&path) {
+        bail!("{shown} is a folder");
+    }
+    let old = if sess.store.is_entry(&path) {
+        let old = sess.read(&path)?;
+        if fileio::marker_filename(&old).is_some() {
+            bail!("{shown} is a file entry");
+        }
+        Some(old)
+    } else {
+        None
+    };
+    let replacing = old.as_ref().and_then(|o| otp::find(o)).is_some();
+    if replacing
+        && !force
+        && !confirm(&format!("{shown} already has a one-time code. Replace it?"))?
+    {
+        return Ok(());
+    }
+    let input = prompt::hidden("otpauth:// URI or secret", &shown)?;
+    let uri = otp::to_uri(&input, path.rsplit('/').next().unwrap_or(&path))?;
+    let mut content = Zeroizing::new(String::new());
+    let mut placed = false;
+    for line in old.as_ref().map_or("", |o| o.as_str()).lines() {
+        if line.trim().starts_with("otpauth://") {
+            if placed {
+                continue;
+            }
+            content.push_str(&uri);
+            placed = true;
+        } else {
+            content.push_str(line);
+        }
+        content.push('\n');
+    }
+    if !placed {
+        content.push_str(&uri);
+        content.push('\n');
+    }
+    sess.save(
+        &path,
+        content.as_bytes(),
+        &format!("Add one-time code for {path} to store."),
+    )?;
+    let (code, left) = otp::current(&content)?;
+    println!(
+        "added a one-time code to {}; it's {} for {left} more seconds",
+        shown.green(),
+        *code
+    );
     Ok(())
 }
 
@@ -1756,6 +1844,14 @@ fn print_help() {
     entry(
         "show [-c] <entry>",
         "print an entry, or -c to copy its first line",
+    );
+    entry(
+        "otp [-c] <entry>",
+        "print, or -c copy, the entry's one-time code",
+    );
+    entry(
+        "otp add [-f] <entry>",
+        "add an otpauth:// URI or secret to an entry (or a new one)",
     );
     entry(
         "insert [-m] [-e] [-f] <entry>",

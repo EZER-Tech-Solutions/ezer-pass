@@ -106,6 +106,7 @@ fn perform(terminal: &mut DefaultTerminal, app: &mut App, effect: Effect) -> Res
             });
             app.finish_copy(&path, "the code for ", result);
         }
+        Effect::AddOtp(path) => app.open_otp(path),
         Effect::Run(batch) => {
             let (done, result) = suspended(terminal, || {
                 let mut done = 0;

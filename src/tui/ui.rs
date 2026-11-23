@@ -136,20 +136,35 @@ fn draw_unlock(f: &mut Frame, u: &Unlock, settings: &Settings) {
 /// The insert popup: the new entry's value, masked like the passphrase.
 fn draw_insert(f: &mut Frame, ins: &Insert) {
     let shown = store::display(&ins.path);
-    let status = if ins.exists {
-        Line::from(format!("{shown} exists — ⏎ replaces it").fg(theme().mark))
-    } else {
-        "encrypted into the store; never shown".dim().into()
+    let status = match (&ins.error, ins.exists, ins.otp) {
+        (Some(e), ..) => Line::from(e.clone().fg(theme().danger)),
+        (None, true, true) => {
+            Line::from(format!("{shown} has a one-time code — ⏎ replaces it").fg(theme().mark))
+        }
+        (None, true, false) => {
+            Line::from(format!("{shown} exists — ⏎ replaces it").fg(theme().mark))
+        }
+        (None, false, true) => "an otpauth:// URI, or the secret a site shows".dim().into(),
+        (None, false, false) => "encrypted into the store; never shown".dim().into(),
     };
     let width = 56.min(f.area().width);
     let len = ins.input.text.chars().count();
-    let (prompt, col) = input_line("value: ", len, ins.input.cursor_col(), '\u{f084}', width);
+    let label = if ins.otp { "secret: " } else { "value: " };
+    let (prompt, col) = input_line(label, len, ins.input.cursor_col(), '\u{f084}', width);
     let lines = vec![prompt, "".into(), status];
     let mut keys = hint_in(&[("⏎", "save"), ("esc", "cancel")], theme().unlock);
     keys.spans.insert(0, " ".into());
     keys.spans.push(" ".into());
     let block = popup(
-        Line::from(format!(" insert {shown} ")).bold(),
+        Line::from(format!(
+            " {} {shown} ",
+            if ins.otp {
+                "one-time code for"
+            } else {
+                "insert"
+            }
+        ))
+        .bold(),
         theme().unlock,
     )
     .title_bottom(keys.right_aligned())

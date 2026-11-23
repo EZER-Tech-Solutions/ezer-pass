@@ -771,10 +771,28 @@ fn cmd_otp_add(sess: &mut Session, arg: &str, force: bool) -> Result<()> {
         return Ok(());
     }
     let input = prompt::hidden("otpauth:// URI or secret", &shown)?;
-    let uri = otp::to_uri(&input, path.rsplit('/').next().unwrap_or(&path))?;
+    let content = with_otp(old.as_ref().map(|o| o.as_str()), &input, &path)?;
+    sess.save(
+        &path,
+        content.as_bytes(),
+        &format!("Add one-time code for {path} to store."),
+    )?;
+    let (code, left) = otp::current(&content)?;
+    println!(
+        "added a one-time code to {}; it's {} for {left} more seconds",
+        shown.green(),
+        *code
+    );
+    Ok(())
+}
+
+/// `old` (or a new entry) with an `otpauth://` line for `input`, a URI
+/// or a bare secret, in place of any it had.
+pub fn with_otp(old: Option<&str>, input: &str, path: &str) -> Result<Zeroizing<String>> {
+    let uri = otp::to_uri(input, path.rsplit('/').next().unwrap_or(path))?;
     let mut content = Zeroizing::new(String::new());
     let mut placed = false;
-    for line in old.as_ref().map_or("", |o| o.as_str()).lines() {
+    for line in old.unwrap_or("").lines() {
         if line.trim().starts_with("otpauth://") {
             if placed {
                 continue;
@@ -790,18 +808,7 @@ fn cmd_otp_add(sess: &mut Session, arg: &str, force: bool) -> Result<()> {
         content.push_str(&uri);
         content.push('\n');
     }
-    sess.save(
-        &path,
-        content.as_bytes(),
-        &format!("Add one-time code for {path} to store."),
-    )?;
-    let (code, left) = otp::current(&content)?;
-    println!(
-        "added a one-time code to {}; it's {} for {left} more seconds",
-        shown.green(),
-        *code
-    );
-    Ok(())
+    Ok(content)
 }
 
 /// The length a generated password has unless told otherwise.

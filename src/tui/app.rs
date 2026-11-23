@@ -10,7 +10,7 @@ use crate::commands::{self, COMMANDS, Session};
 use crate::context::{self, Context};
 use crate::crypto::{self, Keys, WrongPassphrase};
 use crate::password::Spec;
-use crate::{agent, clipboard, fileio, git, index, store};
+use crate::{agent, clipboard, fileio, git, index, otp, store};
 use age::secrecy::SecretString;
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -36,6 +36,9 @@ pub enum Effect {
     Copy(String),
     /// Copy an entry's current one-time code to the clipboard.
     CopyOtp(String),
+    /// Open the popup that adds a one-time code to an entry (or makes
+    /// one); unlocked first, since an existing entry is decrypted.
+    AddOtp(String),
     /// Try the passphrase typed into the unlock popup.
     Unlock,
     /// Run commands with the terminal handed back to them.
@@ -67,6 +70,7 @@ impl Effect {
             Effect::Decrypt(_)
             | Effect::Copy(_)
             | Effect::CopyOtp(_)
+            | Effect::AddOtp(_)
             | Effect::Generate { path: Some(_), .. } => true,
             Effect::Run(batch) => batch.jobs.iter().any(|j| commands::needs_keys(&j.argv)),
             _ => false,
@@ -83,13 +87,18 @@ pub struct Unlock {
     then: Box<Effect>,
 }
 
-/// Typing a new entry's value (`insert <entry>`), masked like the
-/// passphrase.
+/// Typing a new entry's value (`insert <entry>`), or a one-time code's
+/// secret (`otp add <entry>`), masked like the passphrase.
 pub struct Insert {
     pub path: String,
     pub input: Input,
-    /// The entry is there already: saving replaces it.
+    /// The entry (for `otp`, its one-time code) is there already: saving
+    /// replaces it.
     pub exists: bool,
+    /// Adding a one-time code rather than a whole entry.
+    pub otp: bool,
+    /// Why the typed secret wasn't saved.
+    pub error: Option<String>,
 }
 
 /// Commands to run one after another, stopping at the first failure.
@@ -1147,24 +1156,94 @@ impl App {
             KeyCode::Enter if !ins.input.text.is_empty() => self.save_insert(),
             _ => {
                 ins.input.handle(key);
+                ins.error = None;
             }
         }
         Effect::None
     }
 
+    /// Open the `otp add` popup, once unlocked: an existing entry is
+    /// read to say whether it has a code already.
+    pub fn open_otp(&mut self, path: String) {
+        let exists = if self.sess.store.is_entry(&path) {
+            let keys = self.sess.keys.as_ref().expect("gated");
+            match self.sess.store.read_entry(&path, keys) {
+                Ok(c) if fileio::marker_filename(&c).is_some() => {
+                    return self.error(format!("{} is a file entry", store::display(&path)));
+                }
+                Ok(c) => otp::find(&c).is_some(),
+                Err(e) => {
+                    self.forget_locked_agent(&e);
+                    return self.error(format!("{e:#}"));
+                }
+            }
+        } else {
+            false
+        };
+        self.mode = Mode::Insert(Insert {
+            path,
+            input: Input::default(),
+            exists,
+            otp: true,
+            error: None,
+        });
+    }
+
+    /// An `otp add` popup's entry with the typed secret in it; on a bad
+    /// secret (or a failed read) the popup stays open, saying why.
+    fn otp_content(&mut self) -> Option<Zeroizing<String>> {
+        let Mode::Insert(ins) = &mut self.mode else {
+            return None;
+        };
+        let old = match (self.sess.store.is_entry(&ins.path), &self.sess.keys) {
+            (false, _) => Ok(None),
+            (true, Some(keys)) => self.sess.store.read_entry(&ins.path, keys).map(Some),
+            (true, None) => Err(anyhow::anyhow!("locked — esc, then add it again")),
+        };
+        let content = old.and_then(|old| {
+            commands::with_otp(old.as_ref().map(|o| o.as_str()), &ins.input.text, &ins.path)
+        });
+        match content {
+            Ok(content) => Some(content),
+            Err(e) => {
+                ins.error = Some(format!("{e:#}"));
+                None
+            }
+        }
+    }
+
     /// Encrypt the typed value into the entry and commit it.
     fn save_insert(&mut self) {
+        let otp = matches!(&self.mode, Mode::Insert(ins) if ins.otp);
+        let otp_content = if otp {
+            match self.otp_content() {
+                Some(content) => Some(content),
+                None => return,
+            }
+        } else {
+            None
+        };
         let Mode::Insert(mut ins) = std::mem::replace(&mut self.mode, Mode::Browse) else {
             return;
         };
         let typed = Zeroizing::new(std::mem::take(&mut ins.input).text);
-        let content = Zeroizing::new(format!("{}\n", *typed));
         let path = ins.path;
-        let result = self.sess.save(
-            &path,
-            content.as_bytes(),
-            &format!("Add given password for {path} to store."),
-        );
+        let (content, message, done) = match otp_content {
+            Some(content) => (
+                content,
+                format!("Add one-time code for {path} to store."),
+                format!(
+                    "added a one-time code to {} — o copies it",
+                    store::display(&path)
+                ),
+            ),
+            None => (
+                Zeroizing::new(format!("{}\n", *typed)),
+                format!("Add given password for {path} to store."),
+                format!("saved {}", store::display(&path)),
+            ),
+        };
+        let result = self.sess.save(&path, content.as_bytes(), &message);
         let size = fileio::decode_payload(&content)
             .ok()
             .map(|f| f.data.len() as u64);
@@ -1180,7 +1259,7 @@ impl App {
             self.rebuild(None);
         }
         match result {
-            Ok(()) => self.info(format!("saved {}", store::display(&path))),
+            Ok(()) => self.info(done),
             Err(e) => self.error(format!("{e:#}")),
         }
     }
@@ -2327,6 +2406,19 @@ impl App {
                 self.go_to(&path);
                 return Effect::CopyOtp(path);
             }
+            // Ask for the secret in a popup rather than on the terminal.
+            "otp"
+                if positional.len() == 2
+                    && positional[0] == "add"
+                    && flags.iter().all(|f| matches!(*f, "-f" | "--force")) =>
+            {
+                let path = self.sess.resolve(positional[1]);
+                if path.is_empty() || store.is_dir(&path) {
+                    self.error(format!("{} is a folder", store::display(&path)));
+                } else {
+                    return Effect::AddOtp(path);
+                }
+            }
             // Ask for the value in a popup rather than on the terminal.
             "insert"
                 if positional.len() == 1
@@ -2340,6 +2432,8 @@ impl App {
                         exists: store.is_entry(&path),
                         path,
                         input: Input::default(),
+                        otp: false,
+                        error: None,
                     });
                 }
             }
